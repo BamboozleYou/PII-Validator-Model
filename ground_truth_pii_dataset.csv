@@ -1,0 +1,20 @@
+Table Name,Column Name,Column Datatype,Column Length,Guessed Classification,Human Evaluation,Correct Classification,Notes
+users,user_id,integer,11,NOT_PII,CORRECT,NOT_PII,System identifier - clearly not PII
+users,email_address,varchar,255,Email address,CORRECT,Email address,Perfect match - email field
+users,first_name,varchar,50,First name,CORRECT,First name,Perfect match
+users,phone_number,varchar,15,Phone,CORRECT,Phone,Perfect match
+users,date_of_birth,date,10,Date of birth,CORRECT,Date of birth,Perfect match
+users,manager_name,varchar,100,NOT_PII,INCORRECT,Full name,Manager name is a person's name - always PII
+users,contact_person,varchar,80,First name,INCORRECT,Full name,Contact person is typically full name not just first
+users,user_email,varchar,255,Phone,INCORRECT,Email address,Obviously wrong - email field classified as phone
+users,contact_info,varchar,150,Email address,AMBIGUOUS,Email address OR Phone,Could be email OR phone - too vague to be certain
+users,personal_data,text,500,First name,AMBIGUOUS,Full name OR Medical records OR Multiple,Too vague - could be various PII types
+employees,employee_id,integer,11,NOT_PII,CORRECT,NOT_PII,System identifier
+employees,ssn,varchar,11,National Identifier,CORRECT,National Identifier,SSN is correctly a national identifier
+employees,social_security_number,varchar,11,National Identifier,CORRECT,National Identifier,Full SSN field name
+employees,employee_name,varchar,100,First name,INCORRECT,Full name,Employee name is typically full name
+employees,work_phone,varchar,15,Phone,CORRECT,Phone,Work phone is still phone PII
+employees,salary_amount,decimal,10,NOT_PII,CORRECT,NOT_PII,Salary is business data
+employees,department_code,varchar,5,NOT_PII,CORRECT,NOT_PII,Department code is business data
+employees,emergency_contact,varchar,100,Phone,INCORRECT,Full name,Emergency contact is a person's name not phone number
+employees,license_number,varchar,20,Drivers license number,CORRECT,Drivers license number,Perfect match

@@ -1,0 +1,31 @@
+customers,customer_number,varchar,20,NOT_PII,CORRECT,NOT_PII,Business identifier not personal
+customers,company_name,varchar,200,NOT_PII,CORRECT,NOT_PII,Business data
+customers,billing_address,varchar,200,Address,CORRECT,Address,Perfect match
+customers,customer_phone,varchar,15,Email address,INCORRECT,Phone,Phone field classified as email
+customers,contact_email,varchar,255,Email address,CORRECT,Email address,Perfect match
+customers,zip_code,varchar,10,Postal Code,CORRECT,Postal Code,Perfect match
+customers,customer_rep,varchar,100,NOT_PII,INCORRECT,Full name,Customer rep is a person's name
+customers,account_holder,varchar,100,Bank account,INCORRECT,Full name,Account holder is a person's name not account number
+customers,credit_card_num,varchar,19,Bank account,INCORRECT,Bank account,Credit card should be bank account (financial instrument)
+orders,order_id,integer,11,NOT_PII,CORRECT,NOT_PII,System identifier
+orders,tracking_number,varchar,30,NOT_PII,CORRECT,NOT_PII,Business identifier
+orders,customer_contact,varchar,100,Phone,AMBIGUOUS,Phone OR Full name,Could be phone number or contact person name
+orders,delivery_notes,text,500,NOT_PII,CORRECT,NOT_PII,Delivery instructions are business data
+orders,recipient_name,varchar,100,Full name,CORRECT,Full name,Perfect match
+medical,patient_id,integer,11,NOT_PII,CORRECT,NOT_PII,System identifier
+medical,patient_name,varchar,100,Full name,CORRECT,Full name,Perfect match
+medical,medical_record_number,varchar,20,NOT_PII,CORRECT,NOT_PII,System identifier for medical records
+medical,diagnosis_notes,text,2000,Medical records,CORRECT,Medical records,Perfect match
+medical,doctor_name,varchar,100,NOT_PII,INCORRECT,Full name,Doctor name is a person's name
+medical,medicare_id,varchar,15,Medicare ID,CORRECT,Medicare ID,Perfect match
+finance,account_number,varchar,20,Bank account,CORRECT,Bank account,Perfect match
+finance,routing_number,varchar,9,Bank account,CORRECT,Bank account,Banking information
+finance,cardholder_name,varchar,100,Full name,CORRECT,Full name,Perfect match
+finance,card_expiry,varchar,7,NOT_PII,CORRECT,NOT_PII,Card expiry is not personally identifying
+logs,session_id,varchar,64,NOT_PII,CORRECT,NOT_PII,System identifier
+logs,ip_address,varchar,45,NOT_PII,CORRECT,NOT_PII,IP addresses are not direct PII
+logs,user_agent,text,500,NOT_PII,CORRECT,NOT_PII,Browser info is not PII
+logs,user_info,varchar,200,First name,AMBIGUOUS,First name OR Email address OR Multiple,Too generic - could be various PII types
+ambiguous,contact_details,varchar,150,Email address,AMBIGUOUS,Email address OR Phone,Could be either contact method
+ambiguous,personal_identifier,varchar,25,National Identifier,AMBIGUOUS,National Identifier OR Drivers license number,Could be various ID types
+ambiguous,address_info,varchar,300,Address,AMBIGUOUS,Address OR City OR Postal Code,Too vague - could be full address or components
