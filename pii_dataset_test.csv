@@ -1,0 +1,20 @@
+Table Name,Column Name,Column Datatype,Column Length,Guessed Classification
+users,user_id,integer,11,NOT_PII
+users,email_address,varchar,255,Email address
+users,first_name,varchar,50,First name
+users,phone_number,varchar,15,Phone
+users,date_of_birth,date,10,Date of birth
+users,manager_name,varchar,100,NOT_PII
+users,contact_person,varchar,80,First name
+users,user_email,varchar,255,Phone
+users,contact_info,varchar,150,Email address
+users,personal_data,text,500,First name
+employees,employee_id,integer,11,NOT_PII
+employees,ssn,varchar,11,National Identifier
+employees,social_security_number,varchar,11,National Identifier
+employees,employee_name,varchar,100,First name
+employees,work_phone,varchar,15,Phone
+employees,salary_amount,decimal,10,NOT_PII
+employees,department_code,varchar,5,NOT_PII
+employees,emergency_contact,varchar,100,Phone
+employees,license_number,varchar,20,Drivers license number

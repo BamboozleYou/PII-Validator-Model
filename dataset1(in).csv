@@ -1,0 +1,21 @@
+Table Name,Column Name,Column Datatype,Column Length,Guessed Classification
+customers,customer_number,varchar,20,NOT_PII
+customers,company_name,varchar,200,NOT_PII
+customers,billing_address,varchar,200,Address
+customers,customer_phone,varchar,15,Email address
+customers,contact_email,varchar,255,Email address
+customers,zip_code,varchar,10,Postal Code
+customers,customer_rep,varchar,100,NOT_PII
+customers,account_holder,varchar,100,Bank account
+customers,credit_card_num,varchar,19,Bank account
+orders,order_id,integer,11,NOT_PII
+orders,tracking_number,varchar,30,NOT_PII
+orders,customer_contact,varchar,100,Phone
+orders,delivery_notes,text,500,NOT_PII
+orders,recipient_name,varchar,100,Full name
+medical,patient_id,integer,11,NOT_PII
+medical,patient_name,varchar,100,Full name
+medical,medical_record_number,varchar,20,NOT_PII
+medical,diagnosis_notes,text,2000,Medical records
+medical,doctor_name,varchar,100,NOT_PII
+medical,medicare_id,varchar,15,Medicare ID
