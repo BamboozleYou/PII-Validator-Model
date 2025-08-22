@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced PII Validation Runner Script with DeepSeek-R1
-Run this script to validate PII classifications in your spreadsheet
+Targeted PII Validation Runner Script
+Run this script to validate PII classifications against your specific types
 """
 
 import sys
@@ -10,17 +10,22 @@ from datetime import datetime
 from pii_validator import TargetedPIIValidator
 
 def main():
-    print("🔒 Enhanced Local PII Validation System")
+    print("🎯 Targeted PII Validation System")
     print("=" * 50)
     
-    # Configuration - Edit these settings as needed
+    # ⚙️ CONFIGURATION - EDIT THESE SETTINGS ⚙️
+    # ===========================================
+    
+    # 📄 CHANGE THIS TO YOUR CSV FILE:
+    INPUT_FILE = "pii_dataset_test.csv"   # <-- PUT YOUR FILE NAME HERE
+    
+    # 🤖 Model settings (usually don't need to change):
     MODEL_URL = "http://localhost:11434"  # Ollama default
     MODEL_NAME = "deepseek-r1:1.5b"     # DeepSeek-R1 model
-    INPUT_FILE = "dataset1(in).csv"      # Your input file
     
     # Generate timestamped output filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    OUTPUT_FILE = f"pii_validation_results_{timestamp}.csv"
+    OUTPUT_FILE = f"targeted_validation_results_{timestamp}.csv"
     
     print(f"📊 Input file: {INPUT_FILE}")
     print(f"💾 Output file: {OUTPUT_FILE}")
@@ -28,16 +33,29 @@ def main():
     print(f"🌐 Model URL: {MODEL_URL}")
     print()
     
+    # Show expected PII types
+    pii_types = [
+        "Address", "Address 2", "Age", "Bank account", "City", "Country",
+        "Date of birth", "Drivers license number", "Email address", 
+        "First name", "Full name", "Insurance number", "Last name",
+        "Medical records", "Medicare ID", "National Identifier", 
+        "Phone", "Postal Code", "NOT_PII"
+    ]
+    print("🏷️  Supported PII Types:")
+    for i, pii_type in enumerate(pii_types, 1):
+        print(f"   {i:2d}. {pii_type}")
+    print()
+    
     # Check if input file exists
     if not os.path.exists(INPUT_FILE):
         print(f"❌ Error: Input file '{INPUT_FILE}' not found!")
         print("Please ensure your CSV file is in the current directory.")
         print("\nExpected CSV format:")
-        print("Table Name,Column Name,Data Type,Column Width,Guessed PII classification")
+        print("Table Name,Column Name,Column Datatype,Column Length,Guessed Classification")
         sys.exit(1)
     
-    # Initialize enhanced validator
-    print("🔧 Initializing enhanced validator...")
+    # Initialize targeted validator
+    print("🔧 Initializing targeted validator...")
     validator = TargetedPIIValidator(
         model_url=MODEL_URL,
         model_name=MODEL_NAME
@@ -53,10 +71,6 @@ def main():
         print("3. Verify the model is loaded: ollama list")
         print("4. Check the MODEL_URL and MODEL_NAME settings above")
         print(f"5. Try accessing {MODEL_URL} in your browser")
-        print("\nAlternative models you can try:")
-        print("  - ollama pull deepseek-r1:1.5b")
-        print("  - ollama pull deepseek-r1:7b") 
-        print("  - ollama pull deepseek-r1:32b")
         sys.exit(1)
     
     print("✅ DeepSeek-R1 model connection successful!")
@@ -64,8 +78,9 @@ def main():
     
     # Process the spreadsheet
     try:
-        print("🚀 Starting enhanced PII validation process...")
-        print("🧠 Using DeepSeek-R1 with improved prompt engineering...")
+        print("🚀 Starting targeted PII validation process...")
+        print("📋 The system will classify each column and compare with your guess...")
+        print("⚡ Responses: True Positive | Negative | Unsure")
         print("This may take a few minutes depending on your data size...")
         print()
         
@@ -76,109 +91,125 @@ def main():
         
         # Display results summary
         print("\n" + "=" * 60)
-        print("📈 ENHANCED VALIDATION SUMMARY")
+        print("🎯 TARGETED VALIDATION SUMMARY")
         print("=" * 60)
         
         total_rows = len(results)
-        needs_review = results['Needs_Review'].sum()
-        classification_changes = results['changed'].sum()
-        avg_confidence = results['confidence'].astype(float).mean()
-        high_confidence = (results['confidence'].astype(float) >= 0.8).sum()
-        low_confidence = (results['confidence'].astype(float) < 0.5).sum()
+        true_positives = (results['Validation_Result'] == 'True Positive').sum()
+        negatives = (results['Validation_Result'] == 'Negative').sum()
+        unsure = (results['Validation_Result'] == 'Unsure').sum()
+        errors = (results['Validation_Result'] == 'Error').sum()
         
         print(f"✅ Total rows processed: {total_rows}")
-        print(f"⚠️  Rows needing review: {needs_review}")
-        print(f"🔄 Classification changes: {classification_changes}")
-        print(f"🎯 Average confidence: {avg_confidence:.3f}")
-        print(f"🟢 High confidence (≥0.8): {high_confidence}")
-        print(f"🔴 Low confidence (<0.5): {low_confidence}")
+        print(f"🎯 True Positives: {true_positives} ({true_positives/total_rows*100:.1f}%)")
+        print(f"❌ Negatives: {negatives} ({negatives/total_rows*100:.1f}%)")
+        print(f"❓ Unsure: {unsure} ({unsure/total_rows*100:.1f}%)")
+        if errors > 0:
+            print(f"⚠️  Errors: {errors} ({errors/total_rows*100:.1f}%)")
         print(f"📄 Results saved to: {OUTPUT_FILE}")
         
-        # Show classification distribution
-        print(f"\n📊 CLASSIFICATION DISTRIBUTION:")
-        print("-" * 40)
-        classification_counts = results['validated_classification'].value_counts()
-        for classification, count in classification_counts.items():
-            percentage = (count / total_rows) * 100
-            print(f"  {classification}: {count} ({percentage:.1f}%)")
+        # Show accuracy metrics
+        accuracy = true_positives / total_rows * 100
+        print(f"\n📊 ACCURACY METRICS:")
+        print(f"   Agreement Rate: {accuracy:.1f}%")
+        print(f"   Disagreement Rate: {negatives/total_rows*100:.1f}%")
+        print(f"   Uncertainty Rate: {unsure/total_rows*100:.1f}%")
         
-        # Show specific issues that need attention
-        if needs_review > 0:
-            print(f"\n🔍 ITEMS NEEDING REVIEW ({needs_review} items):")
+        # Show specific disagreements (Negatives)
+        if negatives > 0:
+            print(f"\n❌ DISAGREEMENTS ({negatives} items):")
             print("-" * 60)
             
-            review_items = results[results['Needs_Review']].head(10)  # Show first 10
+            negative_items = results[results['Validation_Result'] == 'Negative'].head(10)
             
-            for idx, row in review_items.iterrows():
-                original = row['Guessed PII classification']
-                validated = row['validated_classification']
-                confidence = float(row['confidence'])
+            for idx, row in negative_items.iterrows():
                 table_col = f"{row['Table Name']}.{row['Column Name']}"
+                guessed = row['Guessed Classification']
+                slm_guess = row['SLM_Classification']
                 
-                if row['changed']:
-                    print(f"🔄 {table_col}")
-                    print(f"   Changed: {original} → {validated} (confidence: {confidence:.3f})")
-                elif confidence < 0.7:
-                    print(f"⚠️  {table_col}")
-                    print(f"   Low confidence: {validated} (confidence: {confidence:.3f})")
-                elif confidence == 0.0:
-                    print(f"❌ {table_col}")
-                    print(f"   Processing failed: {validated}")
-                
-                print(f"   Reason: {row['reasoning'][:100]}...")
+                print(f"🔄 {table_col}")
+                print(f"   Your Guess: {guessed}")
+                print(f"   SLM Says: {slm_guess}")
+                print(f"   Reason: {row['Reasoning']}")
                 print()
             
-            if needs_review > 10:
-                print(f"... and {needs_review - 10} more items (see full results in CSV)")
+            if negatives > 10:
+                print(f"... and {negatives - 10} more disagreements (see full results in CSV)")
         
-        # Show improvement suggestions
-        print(f"\n💡 RECOMMENDATIONS:")
+        # Show uncertain classifications
+        if unsure > 0:
+            print(f"\n❓ UNCERTAIN CLASSIFICATIONS ({unsure} items):")
+            print("-" * 60)
+            
+            unsure_items = results[results['Validation_Result'] == 'Unsure'].head(5)
+            
+            for idx, row in unsure_items.iterrows():
+                table_col = f"{row['Table Name']}.{row['Column Name']}"
+                guessed = row['Guessed Classification']
+                
+                print(f"❓ {table_col}")
+                print(f"   Your Guess: {guessed}")
+                print(f"   Reason: {row['Reasoning']}")
+                print()
+            
+            if unsure > 5:
+                print(f"... and {unsure - 5} more uncertain items (see full results in CSV)")
+        
+        # Show validation insights
+        print(f"\n💡 INSIGHTS:")
         print("-" * 30)
-        if classification_changes > 0:
-            print(f"✓ DeepSeek-R1 corrected {classification_changes} classifications")
-        if high_confidence >= total_rows * 0.8:
-            print("✓ High confidence results - model is performing well")
-        if low_confidence > total_rows * 0.1:
-            print("⚠️  Consider reviewing low confidence items manually")
-        if needs_review == 0:
-            print("🎉 Perfect! All classifications validated with high confidence")
+        if true_positives >= total_rows * 0.8:
+            print("✓ High agreement - Your initial classifications are very good!")
+        elif true_positives >= total_rows * 0.6:
+            print("✓ Good agreement - Most classifications are accurate")
+        else:
+            print("⚠️  Low agreement - Consider reviewing your classification approach")
+            
+        if negatives > 0:
+            print(f"✓ Found {negatives} potential classification improvements")
+        if unsure > total_rows * 0.2:
+            print("⚠️  Many uncertain classifications - consider more descriptive column names")
+        if unsure == 0 and negatives == 0:
+            print("🎉 Perfect! All classifications validated successfully")
         
-        print("\n🎉 Enhanced PII validation completed successfully!")
+        print("\n🎉 Targeted PII validation completed!")
         print(f"📂 Open '{OUTPUT_FILE}' to review all results")
-        print("\n📋 CSV Columns explained:")
-        print("  - validated_classification: DeepSeek-R1's assessment") 
-        print("  - confidence: Model's confidence (0.0-1.0)")
-        print("  - reasoning: Detailed explanation of the decision")
-        print("  - changed: Whether classification was modified")
-        print("  - Needs_Review: Flags items requiring manual review")
+        print("\n📋 Output CSV columns:")
+        print("  - Validation_Result: True Positive | Negative | Unsure")
+        print("  - SLM_Classification: SLM's classification (for Negative cases)")
+        print("  - Reasoning: Explanation of the decision")
         
     except Exception as e:
         print(f"❌ Error during processing: {e}")
         print("\nPlease check:")
         print("1. Your CSV file format matches the expected columns:")
-        print("   Table Name,Column Name,Data Type,Column Width,Guessed PII classification")
+        print("   Table Name,Column Name,Column Datatype,Column Length,Guessed Classification")
         print("2. DeepSeek-R1 model is still running and accessible")
         print("3. You have write permissions in this directory")
-        print("4. Your CSV file is properly formatted (no special characters)")
+        print("4. Your CSV file is properly formatted")
         sys.exit(1)
 
-def print_model_info():
-    """Print information about DeepSeek-R1 models"""
-    print("\n🤖 DEEPSEEK-R1 MODEL INFORMATION:")
-    print("-" * 40)
-    print("DeepSeek-R1 is a reasoning-focused language model that excels at")
-    print("analytical tasks like PII classification. Available variants:")
-    print()
-    print("  deepseek-r1:1.5b  - Fastest, lowest memory (2GB RAM)")
-    print("  deepseek-r1:7b    - Balanced performance (8GB RAM)")  
-    print("  deepseek-r1:32b   - Best accuracy (32GB RAM)")
-    print("  deepseek-r1:latest - Latest available version")
-    print()
-    print("To install: ollama pull deepseek-r1:7b")
-    print("To run: ollama serve (in separate terminal)")
+def show_classification_examples():
+    """Show examples of how the system classifies"""
+    print("\n🎯 CLASSIFICATION EXAMPLES:")
+    print("=" * 40)
+    
+    examples = [
+        ("email_address", "Email address", "True Positive", "Clear email field"),
+        ("user_email", "Phone", "Negative: Email address", "Mislabeled as phone"),
+        ("contact_info", "Email address", "Unsure", "Could be email or phone"),
+        ("first_name", "First name", "True Positive", "Clear first name field"),
+        ("personal_data", "First name", "Unsure", "Too vague to determine"),
+        ("ssn", "National Identifier", "True Positive", "Clear SSN field"),
+        ("phone_number", "Phone", "True Positive", "Clear phone field"),
+        ("user_id", "NOT_PII", "True Positive", "Non-personal identifier"),
+    ]
+    
+    for column, guess, result, reason in examples:
+        print(f"Column: {column:15} | Guess: {guess:18} | Result: {result:25} | {reason}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--info":
-        print_model_info()
+    if len(sys.argv) > 1 and sys.argv[1] == "--examples":
+        show_classification_examples()
     else:
         main()
