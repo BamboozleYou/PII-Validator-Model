@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Optional
 class TargetedPIIValidator:
     """Targeted PII Validator with specific classification types and response format"""
     
-    def __init__(self, model_url: str = "http://localhost:11434", model_name: str = "deepseek-r1:8b"):
+    def __init__(self, model_url: str = "http://localhost:11434", model_name: str = "deepseek-r1:1.5b"):
         self.model_url = model_url.rstrip('/')
         self.model_name = model_name
         self.api_endpoint = f"{self.model_url}/api/generate"
@@ -29,18 +29,19 @@ class TargetedPIIValidator:
     
     def get_targeted_prompt(self, table_name: str, column_name: str, data_type: str, 
                           column_length: str, guessed_classification: str) -> str:
-        """Create a targeted prompt with comprehensive few-shot learning examples"""
+        """Create a comprehensive prompt with tons of clear examples"""
         
         prompt = f"""You are a PII classification expert. Learn from these examples to classify database columns based on column names, then validate against existing guesses.
 
 **VALID PII TYPES:**
 - Address, Address 2, Age, Bank account, City, Country, Date of birth, Drivers license number
 - Email address, First name, Full name, Insurance number, Last name, Medical records
-- Medicare ID, National Identifier, Phone, Postal Code, NOT_PII
+- Medicare ID, National Identifier, Phone, Postal Code, NOT_PII, Financial Data
 
 **LEARN FROM THESE EXAMPLES:**
 
 🎯 TRUE POSITIVE Examples (Model agrees with guess):
+
 Column: "email_address" | Guess: Email address | Decision: True Positive
 Reasoning: Clear email field name matches the guess perfectly
 
@@ -56,14 +57,14 @@ Reasoning: Clear birth date field, correct classification
 Column: "user_id" | Guess: NOT_PII | Decision: True Positive
 Reasoning: Technical identifier, not personal data, guess correct
 
+Column: "employee_id" | Guess: NOT_PII | Decision: True Positive
+Reasoning: Work identifier, not personal information
+
 Column: "ssn" | Guess: National Identifier | Decision: True Positive
 Reasoning: SSN is clearly a national identifier, correct guess
 
 Column: "social_security_number" | Guess: National Identifier | Decision: True Positive
 Reasoning: Full SSN field name, definitely national identifier
-
-Column: "employee_id" | Guess: NOT_PII | Decision: True Positive
-Reasoning: Work identifier, not personal information
 
 Column: "work_phone" | Guess: Phone | Decision: True Positive
 Reasoning: Business phone number, still phone type
@@ -71,18 +72,34 @@ Reasoning: Business phone number, still phone type
 Column: "license_number" | Guess: Drivers license number | Decision: True Positive
 Reasoning: Driver's license field, correct classification
 
+Column: "manager_name" | Guess: NOT_PII | Decision: True Positive
+Reasoning: Job role reference, not personal identifying data, guess correct
+
+Column: "department_code" | Guess: NOT_PII | Decision: True Positive
+Reasoning: Organizational code, not personal data, guess correct
+
+Column: "salary_amount" | Guess: NOT_PII | Decision: True Positive
+Reasoning: Financial data but not personally identifying, guess correct
+
+Column: "order_id" | Guess: NOT_PII | Decision: True Positive
+Reasoning: Transaction identifier, not personal data, guess correct
+
+Column: "last_name" | Guess: Last name | Decision: True Positive
+Reasoning: Clear surname field, matches guess perfectly
+
 🚫 NEGATIVE Examples (Model disagrees with guess):
+
 Column: "user_email" | Guess: Phone | Decision: Negative: Email address
 Reasoning: Contains "email" in name but guessed as phone - clearly an email field
 
 Column: "contact_email" | Guess: Phone | Decision: Negative: Email address
 Reasoning: "email" in column name indicates email address, not phone
 
-Column: "home_address" | Guess: City | Decision: Negative: Address
-Reasoning: Full address field, not just city information
-
 Column: "customer_phone" | Guess: Email address | Decision: Negative: Phone
 Reasoning: Contains "phone" in name, clearly a phone number field
+
+Column: "home_address" | Guess: City | Decision: Negative: Address
+Reasoning: Full address field, not just city information
 
 Column: "birth_date" | Guess: Age | Decision: Negative: Date of birth
 Reasoning: Birth date field, not age calculation
@@ -90,7 +107,23 @@ Reasoning: Birth date field, not age calculation
 Column: "zip_code" | Guess: Address | Decision: Negative: Postal Code
 Reasoning: ZIP codes are postal codes, not full addresses
 
+Column: "employee_name" | Guess: NOT_PII | Decision: Negative: First name
+Reasoning: Contains "name" - this is a person's name, not organizational data
+
+Column: "customer_name" | Guess: NOT_PII | Decision: Negative: First name
+Reasoning: Person's name field, clearly personal identifying information
+
+Column: "full_name" | Guess: First name | Decision: Negative: Full name
+Reasoning: Contains both first and last name, not just first name
+
+Column: "mobile_phone" | Guess: Email address | Decision: Negative: Phone
+Reasoning: "mobile_phone" clearly indicates phone number, not email
+
+Column: "zip_code" | Guess: NOT_PII | Decision: Negative: Postal Code
+Reasoning: "zip_code" clearly indicates zip code or postal code, and is PII
+
 ❓ UNSURE Examples (Too ambiguous to determine):
+
 Column: "contact_info" | Guess: Email address | Decision: Unsure
 Reasoning: Could be email, phone, or address - too generic to determine
 
@@ -109,6 +142,29 @@ Reasoning: Too generic, could contain various user data types
 Column: "data_field" | Guess: NOT_PII | Decision: Unsure
 Reasoning: Completely non-descriptive column name
 
+Column: "contact_details" | Guess: Phone | Decision: Unsure
+Reasoning: Too vague - could be phone, email, or address
+
+Column: "personal_information" | Guess: First name | Decision: Unsure
+Reasoning: Generic term, could contain any personal data type
+
+**CLASSIFICATION RULES TO REMEMBER:**
+- email/email_address/user_email → Email address
+- phone/phone_number/mobile_phone → Phone
+- first_name/fname/given_name → First name  
+- last_name/lname/surname → Last name
+- full_name/complete_name → Full name
+- ssn/social_security_number → National Identifier
+- user_id/employee_id/order_id/customer_id → NOT_PII (technical identifiers)
+- department_code/dept_code/department_id → NOT_PII (organizational)
+- manager_name/supervisor_name/total/amount → NOT_PII (job roles, not personal, not identifying)
+- salary/price/credit_card_number → Financial Data (financial data)
+- address/home_address/street_address → Address
+- zip_code/postal_code → Postal Code
+- birth_date/date_of_birth/dob → Date of birth
+- employee_name/customer_name/person_name → First name (person names)
+- contact_info/personal_data/user_info → UNSURE (too vague)
+
 **YOUR TASK:**
 Based on the patterns you learned above, analyze this column:
 
@@ -121,10 +177,10 @@ Existing Guess: {guessed_classification}
 **DECISION PROCESS:**
 1. Look at the column name carefully
 2. Does it clearly indicate a specific PII type? (like "email_address", "phone_number")
-3. Compare your classification with the existing guess
-4. If they match → True Positive
-5. If they differ → Negative: [YOUR_CLASSIFICATION]  
-6. If column name is too vague → Unsure
+3. Make a classification based on the column name using what you learnt. Then, make a suitable guess of the classification in one of those categories specified above.
+4. If the Existing Guess cell does NOT match your guess → Negative: [YOUR_CLASSIFICATION]  
+6. If column name is too VAGUE and needs additionial details/you have more than one guess → Unsure
+7. If Existing Guess cell matches your guess → True Positive 
 
 **RESPOND IN EXACT JSON FORMAT:**
 {{
@@ -198,13 +254,23 @@ Response:"""
                 
                 if 'response' in result and 'reasoning' in result:
                     response_text = result['response'].strip()
+                    reasoning = result['reasoning'].strip()
                     
-                    # Validate response format
+                    # Check for "Unsure" indicators in reasoning even if response format is wrong
+                    unsure_indicators = ['too vague', 'too generic', 'ambiguous', 'unclear', 'cannot determine', 'too broad']
+                    if any(indicator in reasoning.lower() for indicator in unsure_indicators):
+                        return {
+                            "validation_result": "Unsure",
+                            "slm_classification": None,
+                            "reasoning": reasoning
+                        }
+                    
+                    # Parse the response
                     if response_text == "True Positive":
                         return {
                             "validation_result": "True Positive",
                             "slm_classification": None,
-                            "reasoning": result['reasoning']
+                            "reasoning": reasoning
                         }
                     elif response_text.startswith("Negative:"):
                         # Extract the SLM's classification
@@ -212,34 +278,41 @@ Response:"""
                         return {
                             "validation_result": "Negative",
                             "slm_classification": slm_class,
-                            "reasoning": result['reasoning']
+                            "reasoning": reasoning
                         }
                     elif response_text == "Unsure":
                         return {
-                            "validation_result": "Unsure", 
+                            "validation_result": "Unsure",
                             "slm_classification": None,
-                            "reasoning": result['reasoning']
+                            "reasoning": reasoning
                         }
             
-            # Fallback parsing if JSON is malformed
+            # Fallback parsing for non-JSON responses
             response_lower = response.lower()
-            if "true positive" in response_lower:
-                return {
-                    "validation_result": "True Positive",
-                    "slm_classification": None,
-                    "reasoning": "Parsed from text response"
-                }
-            elif "negative" in response_lower:
-                return {
-                    "validation_result": "Negative",
-                    "slm_classification": "Unknown",
-                    "reasoning": "Could not parse SLM classification"
-                }
-            elif "unsure" in response_lower:
+            
+            # Check for unsure indicators first
+            unsure_indicators = ['too vague', 'too generic', 'ambiguous', 'unclear', 'cannot determine', 'too broad']
+            if any(indicator in response_lower for indicator in unsure_indicators) or "unsure" in response_lower:
                 return {
                     "validation_result": "Unsure",
                     "slm_classification": None,
-                    "reasoning": "Parsed from text response"
+                    "reasoning": "Column name too ambiguous to classify definitively"
+                }
+            
+            # Check for true positive
+            if "true positive" in response_lower or "matches" in response_lower:
+                return {
+                    "validation_result": "True Positive",
+                    "slm_classification": None,
+                    "reasoning": "Classification matches the guess"
+                }
+            
+            # Check for negative
+            if "negative" in response_lower or "disagree" in response_lower or "conflict" in response_lower:
+                return {
+                    "validation_result": "Negative",
+                    "slm_classification": "Unknown",
+                    "reasoning": "Classification differs from guess"
                 }
             
             # Default fallback
@@ -259,11 +332,26 @@ Response:"""
     def validate_single_classification(self, table_name: str, column_name: str, 
                                      data_type: str, column_length: str, 
                                      guessed_classification: str) -> Dict:
-        """Validate a single PII classification"""
+        """Validate a single PII classification with clean isolation"""
         
+        # Clean inputs to avoid processing errors
+        table_name = str(table_name).strip()
+        column_name = str(column_name).strip()
+        data_type = str(data_type).strip()
+        column_length = str(column_length).strip()
+        guessed_classification = str(guessed_classification).strip()
+        
+        # Create completely fresh prompt for each request
         prompt = self.get_targeted_prompt(
-            table_name, column_name, data_type, column_length, guessed_classification
+            table_name=table_name,
+            column_name=column_name,
+            data_type=data_type,
+            column_length=column_length,
+            guessed_classification=guessed_classification
         )
+        
+        # Add longer delay to ensure fresh context
+        time.sleep(1.0)
         
         response = self.query_model(prompt)
         
@@ -274,49 +362,77 @@ Response:"""
                 "reasoning": "Model query failed"
             }
         
-        return self.parse_model_response(response)
+        result = self.parse_model_response(response)
+        
+        return result
     
     def process_spreadsheet(self, input_file: str, output_file: str) -> pd.DataFrame:
-        """Process entire spreadsheet with targeted validation"""
+        """Process entire spreadsheet with clean isolation (like debug script)"""
         
         print(f"📖 Reading input file: {input_file}")
         df = pd.read_csv(input_file)
         
+        # Check for correct column names (matching your CSV format)
         required_columns = ['Table Name', 'Column Name', 'Column Datatype', 'Column Length', 'Guessed Classification']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
+            print(f"❌ Missing required columns: {missing_columns}")
+            print(f"📋 Your CSV has these columns: {list(df.columns)}")
+            print(f"🔧 Expected columns: {required_columns}")
             raise ValueError(f"Missing required columns: {missing_columns}")
         
-        # Initialize new columns
+        # Initialize new columns for results
         df['Validation_Result'] = ''
         df['SLM_Classification'] = ''
         df['Reasoning'] = ''
         
         total_rows = len(df)
-        print(f"🔍 Processing {total_rows} rows...")
+        print(f"🔍 Processing {total_rows} rows with clean isolation...")
         
         for idx, row in df.iterrows():
-            print(f"Processing row {idx + 1}/{total_rows}: {row['Table Name']}.{row['Column Name']}")
+            table = str(row['Table Name']).strip()
+            column = str(row['Column Name']).strip()
+            dtype = str(row['Column Datatype']).strip()
+            length = str(row['Column Length']).strip()
+            guess = str(row['Guessed Classification']).strip()
             
-            result = self.validate_single_classification(
-                table_name=str(row['Table Name']),
-                column_name=str(row['Column Name']),
-                data_type=str(row['Column Datatype']),
-                column_length=str(row['Column Length']),
-                guessed_classification=str(row['Guessed Classification'])
-            )
+            print(f"\nProcessing row {idx + 1}/{total_rows}: {table}.{column}")
+            print(f"  Input: Table='{table}', Column='{column}', Guess='{guess}'")
             
-            # Update DataFrame
-            df.loc[idx, 'Validation_Result'] = result['validation_result']
-            df.loc[idx, 'SLM_Classification'] = result['slm_classification'] or ''
-            df.loc[idx, 'Reasoning'] = result['reasoning']
+            try:
+                # Process exactly like debug script that works
+                result = self.validate_single_classification(
+                    table_name=table,
+                    column_name=column,
+                    data_type=dtype,
+                    column_length=length,
+                    guessed_classification=guess
+                )
+                
+                # Update DataFrame with results
+                df.loc[idx, 'Validation_Result'] = result['validation_result']
+                df.loc[idx, 'SLM_Classification'] = result['slm_classification'] or ''
+                df.loc[idx, 'Reasoning'] = result['reasoning']
+                
+                # Show result immediately
+                decision = result['validation_result']
+                if result['slm_classification']:
+                    decision = f"Negative: {result['slm_classification']}"
+                print(f"  Result: {decision}")
+                
+            except Exception as e:
+                print(f"❌ Error processing row {idx + 1}: {e}")
+                df.loc[idx, 'Validation_Result'] = 'Error'
+                df.loc[idx, 'SLM_Classification'] = ''
+                df.loc[idx, 'Reasoning'] = f"Processing error: {str(e)}"
             
-            # Small delay to avoid overwhelming the model
-            time.sleep(0.3)
+            # Extra delay to ensure completely fresh context for next request
+            if idx < total_rows - 1:  # Don't delay after last row
+                time.sleep(2.0)
         
         # Save results
-        print(f"💾 Saving results to: {output_file}")
+        print(f"\n💾 Saving results to: {output_file}")
         df.to_csv(output_file, index=False)
         
         return df
