@@ -1,7 +1,18 @@
 import re
+import json
+import logging
 import requests
 from dataclasses import dataclass
 from typing import List, Optional
+from collections import Counter
+
+# ---------- Logging ----------
+logger = logging.getLogger("pii_validator")
+if not logger.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(h)
+logger.setLevel(logging.INFO)  # bumped to DEBUG when cfg.debug=True
 
 # --- Config ---------------------------------------------------
 
@@ -11,153 +22,922 @@ class ModelConfig:
     model: str = ""
     base_url: str = "http://localhost:11434"
     label_space: Optional[List[str]] = None
+    request_timeout: int = 45
+    debug: bool = False            # enable verbose logs
 
-# --- Label canonicalization ----------------------------------
+# --- Fixed label set (use these EXACT human labels) ----------
+
+PII_LABELS: List[str] = [
+    "Address",
+    "Address 2",
+    "Age",
+    "Bank account",
+    "City",
+    "Country",
+    "Date of birth",
+    "Drivers license number",
+    "Email addresses",
+    "First name",
+    "Full name",
+    "Insurance number",
+    "Last name",
+    "Medical records",
+    "Medicare ID",
+    "National Identifier",
+    "Phone",
+    "Postal Code",
+]
+
+# --- Column name normalization for prompt clarity ------------
+
+_CAMEL_RE = re.compile(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])')
+_NON_ALNUM_RE = re.compile(r'[^a-z0-9]+')
+
+def _normalize_colname(name: str) -> str:
+    if not name:
+        return ""
+    s = str(name)
+    
+    # Handle bracketed database-style column names like [inp_PSSN], [pd_SFName]
+    s = re.sub(r'[\[\]]', '', s)  # Remove brackets
+    
+    # Handle common database prefixes but preserve the main part
+    s = re.sub(r'^(inp_|pd_|tbl_|usr_|cust_)', '', s)  # Remove common prefixes
+    
+    # Handle camelCase
+    s = _CAMEL_RE.sub(" ", s)
+    
+    # Replace underscores and non-alphanumeric with spaces  
+    s = re.sub(r'[_\W]+', ' ', s)
+    
+    # Clean up and return
+    return " ".join(s.split()).lower()
+
+def _analyze_all_words(column_name: str, label_space: List[str]) -> Optional[str]:
+    """
+    Analyze ALL identifiable words in column name and return PII type only if there's consensus.
+    Returns None if multiple conflicting PII types are detected.
+    """
+    if not column_name:
+        return None
+        
+    # Normalize and extract all words
+    normalized = _normalize_colname(column_name)
+    words = normalized.split()
+    
+    # Word-to-PII-type mapping
+    word_mappings = {
+        # Medicare/Insurance (HIGH PRIORITY - check context)
+        "medicare": ["Medicare ID"],
+        "hic": ["Medicare ID"], 
+        "mco": ["Medicare ID"],  # MCO = Managed Care Organization (Medicare context)
+        "insurance": ["Insurance number"],
+        "policy": ["Insurance number"],
+        
+        # National IDs
+        "ssn": ["National Identifier"],
+        "pssn": ["National Identifier"], 
+        "sssn": ["National Identifier"],
+        "dssn": ["National Identifier"],
+        "social": ["National Identifier"],
+        "security": ["National Identifier"],
+        "national": ["National Identifier"],
+        "aadhaar": ["National Identifier"],
+        "aadhar": ["National Identifier"],
+        "pan": ["National Identifier"],
+        
+        # Names (can be ambiguous)
+        "fname": ["First name"],
+        "sfname": ["First name"],
+        "dfname": ["First name"], 
+        "first": ["First name"],
+        "given": ["First name"],
+        "firstname": ["First name"],
+        
+        "lname": ["Last name"],
+        "slname": ["Last name"],
+        "dlname": ["Last name"],
+        "dmname": ["Last name"],
+        "last": ["Last name"],
+        "surname": ["Last name"],
+        "family": ["Last name"],
+        "lastname": ["Last name"],
+        
+        "full": ["Full name"],
+        "complete": ["Full name"],
+        "employee": ["Full name"],  # employee_name -> Full name
+        
+        # Contact Info (context-dependent)
+        "email": ["Email addresses"],
+        "mail": ["Email addresses"],
+        
+        "phone": ["Phone"],
+        "mobile": ["Phone"],
+        "cell": ["Phone"],
+        "telephone": ["Phone"],
+        "tel": ["Phone"],
+        
+        # Address
+        "address": ["Address"],
+        "addr": ["Address"],
+        "street": ["Address"], 
+        "home": ["Address"],
+        "saddress": ["Address"],
+        "daddress": ["Address"],
+        
+        # Location
+        "city": ["City"],
+        "town": ["City"],
+        "country": ["Country"],
+        
+        # Postal
+        "zip": ["Postal Code"],
+        "postal": ["Postal Code"],
+        "pin": ["Postal Code"],
+        
+        # Date/Age
+        "dob": ["Date of birth"],
+        "birth": ["Date of birth"],
+        "ddob": ["Date of birth"],
+        "age": ["Age"],
+        
+        # Other
+        "bank": ["Bank account"],
+        "account": ["Bank account"],
+        "medical": ["Medical records"],
+        "license": ["Drivers license number"],
+        "licence": ["Drivers license number"],
+        "driving": ["Drivers license number"],
+        
+        # Context words (help disambiguation but don't vote alone)
+        "user": [],     # user_email -> email gets the vote
+        "customer": [], # customer_phone -> phone gets the vote  
+        "number": [],   # mobile_number -> mobile gets the vote
+        "code": [],     # zip_code -> zip gets the vote
+        "date": [],     # birth_date -> birth gets the vote
+        "name": [],     # too ambiguous alone
+        "id": [],       # too generic alone
+        "num": [],      # too generic alone
+        "no": [],       # too generic alone
+        "plan": [],     # could be many things alone
+    }
+    
+    # SPECIAL CASE: Handle compound patterns that should always win
+    compound_patterns = {
+        # Medicare compound patterns (highest priority)
+        ("hic", "medicare"): "Medicare ID",
+        ("mco", "medicare"): "Medicare ID", 
+        ("hic", "id", "medicare"): "Medicare ID",
+        ("mco", "name", "medicare"): "Medicare ID",
+        ("mco", "plan", "medicare"): "Medicare ID",
+        
+        # Contact compound patterns
+        ("user", "email"): "Email addresses",
+        ("customer", "phone"): "Phone",
+        ("mobile", "number"): "Phone",
+        
+        # Other compound patterns
+        ("zip", "code"): "Postal Code",
+        ("birth", "date"): "Date of birth",
+        ("employee", "name"): "Full name",
+        ("home", "address"): "Address",
+    }
+    
+    # Check for compound patterns first
+    words_set = set(words)
+    for pattern_words, pii_type in compound_patterns.items():
+        if all(word in words_set for word in pattern_words) and pii_type in label_space:
+            logger.debug(f"[MULTI_WORD] Compound pattern match: {pattern_words} -> {pii_type}")
+            return pii_type
+    
+    # Collect all potential PII types for each meaningful word
+    detected_types = []
+    word_contributions = {}
+    
+    for word in words:
+        if word in word_mappings and word_mappings[word]:  # Only count words that vote
+            potential_types = word_mappings[word]
+            detected_types.extend(potential_types)
+            word_contributions[word] = potential_types
+    
+    logger.debug(f"[MULTI_WORD] '{column_name}' -> normalized: '{normalized}' -> words: {words}")
+    logger.debug(f"[MULTI_WORD] word_contributions: {word_contributions}")
+    
+    if not detected_types:
+        logger.debug(f"[MULTI_WORD] No PII patterns detected")
+        return None
+        
+    # Count occurrences of each PII type
+    type_counts = Counter(detected_types)
+    logger.debug(f"[MULTI_WORD] type_counts: {dict(type_counts)}")
+    
+    # Get unique PII types that were detected
+    unique_types = list(type_counts.keys())
+    
+    # Filter to only types that are in our label space
+    valid_types = [t for t in unique_types if t in label_space]
+    
+    # Decision logic:
+    if len(valid_types) == 0:
+        logger.debug(f"[MULTI_WORD] No valid types in label space")
+        return None
+    elif len(valid_types) == 1:
+        # Clear consensus
+        result = valid_types[0]
+        logger.debug(f"[MULTI_WORD] Clear consensus: {result}")
+        return result
+    else:
+        # Multiple different PII types detected - check for clear winner
+        most_common_type, most_common_count = type_counts.most_common(1)[0]
+        
+        # If one type appears significantly more than others, use it
+        if most_common_count > 1 and most_common_type in label_space:
+            logger.debug(f"[MULTI_WORD] Clear winner by frequency: {most_common_type} ({most_common_count} votes)")
+            return most_common_type
+        else:
+            # True conflict - multiple types with equal evidence
+            logger.debug(f"[MULTI_WORD] True conflict detected: {valid_types} -> returning None for Unsure")
+            return None
+
+# --- Canonicalization with multi-word analysis --------------
 
 def _canonicalize(label: str, label_space: list[str]) -> str | None:
     if not label:
         return None
 
-    # Normalization
-    norm = label.strip().lower()
+    txt = label.strip()
+    if txt.lower() == "unsure":
+        return None
 
-    # Custom synonym mappings
+    # First try multi-word analysis on the original input
+    multi_word_result = _analyze_all_words(txt, label_space)
+    if multi_word_result:
+        return multi_word_result
+
+    # If no multi-word match, fall back to original synonym-based approach
+    norm = txt.lower()
+
+    # Expanded synonym mapping for better pattern recognition
     synonyms = {
-        "zip code": "Postal code",
-        "zipcode": "Postal code",
-        "postal": "Postal code",
-        "address line 1": "Address",
-        "addr1": "Address",
-        "address line 2": "Address2",
-        "addr2": "Address2"
+        # Medicare variations (high priority)
+        "medicare id": "Medicare ID",
+        "medicare": "Medicare ID",
+        "hic": "Medicare ID",
+        "hic id": "Medicare ID", 
+        "hic_id": "Medicare ID",
+        "mco name": "Medicare ID",
+        "mco plan": "Medicare ID",
+        "mco_name": "Medicare ID",
+        "mco_plan": "Medicare ID", 
+        "health insurance claim": "Medicare ID",
+        
+        # Email variations
+        "email": "Email addresses",
+        "email address": "Email addresses", 
+        "emails": "Email addresses",
+        "e-mail": "Email addresses",
+        "mail": "Email addresses",
+        "email addr": "Email addresses",
+
+        # Phone variations  
+        "phone number": "Phone",
+        "telephone": "Phone",
+        "mobile": "Phone", 
+        "cell": "Phone",
+        "phone no": "Phone",
+        "tel": "Phone",
+        "mobile number": "Phone",
+        "cell phone": "Phone",
+        "telephone number": "Phone",
+
+        # Date of birth variations
+        "dob": "Date of birth",
+        "date of birth": "Date of birth",
+        "birthdate": "Date of birth", 
+        "birth date": "Date of birth",
+        "birth_date": "Date of birth",
+        "dateofbirth": "Date of birth",
+
+        # Postal code variations
+        "postal code": "Postal Code",
+        "postcode": "Postal Code", 
+        "zip": "Postal Code",
+        "zip code": "Postal Code",
+        "zipcode": "Postal Code",
+        "zip_code": "Postal Code",
+        "pin code": "Postal Code",
+        "pincode": "Postal Code",
+
+        # License variations
+        "drivers license": "Drivers license number",
+        "driver license": "Drivers license number", 
+        "driving license": "Drivers license number",
+        "license": "Drivers license number",
+        "licence": "Drivers license number",
+
+        # Address variations
+        "address": "Address",
+        "addr": "Address", 
+        "street address": "Address",
+        "home address": "Address",
+        "mailing address": "Address",
+        
+        "address line 2": "Address 2",
+        "addr2": "Address 2",
+        "address2": "Address 2",
+
+        # Name variations
+        "first name": "First name",
+        "fname": "First name", 
+        "firstname": "First name",
+        "given name": "First name",
+        "forename": "First name",
+        
+        "last name": "Last name",
+        "lname": "Last name",
+        "lastname": "Last name", 
+        "surname": "Last name",
+        "family name": "Last name",
+        
+        "full name": "Full name",
+        "name": "Full name",
+        "complete name": "Full name",
+        
+        # National ID variations (important for SSN patterns)
+        "ssn": "National Identifier",
+        "social security number": "National Identifier",
+        "social security": "National Identifier", 
+        "aadhaar": "National Identifier",
+        "aadhar": "National Identifier",
+        "pan": "National Identifier", 
+        "national id": "National Identifier",
+        "citizen id": "National Identifier",
+
+        # Other variations
+        "age": "Age",
+        "city": "City", 
+        "town": "City",
+        "country": "Country",
+        
+        # Bank/financial
+        "account": "Bank account",
+        "bank account": "Bank account",
+        "account number": "Bank account",
     }
+    
+    # Check regular synonyms
+    if norm in synonyms and synonyms[norm] in label_space:
+        mapped = synonyms[norm]
+        logger.debug(f"[MAP] synonym '{txt}' -> '{mapped}'")
+        return mapped
 
-    if norm in synonyms:
-        canonical = synonyms[norm]
-        if canonical in label_space:
-            return canonical
-
-    # Fallback: case-insensitive match against label space
     for l in label_space:
         if l.strip().lower() == norm:
+            logger.debug(f"[MAP] exact ci-match '{txt}' -> '{l}'")
             return l
 
+    # minimal plural/case fallback
+    def _canon_basic(s: str) -> str:
+        s2 = s.strip().lower()
+        return s2[:-1] if s2.endswith("s") and not s2.endswith("ss") else s2
+
+    canon_txt = _canon_basic(txt)
+    for l in label_space:
+        if _canon_basic(l) == canon_txt:
+            logger.debug(f"[MAP] basic-canon '{txt}' -> '{l}'")
+            return l
+
+    logger.debug(f"[MAP] no mapping for '{txt}' -> None")
     return None
 
-
-# --- Heuristic Guessing --------------------------------------
-
-class HeuristicPIIGuesser:
-    def __init__(self, label_space: List[str]):
-        self.label_space = label_space
-
-        self.rules = [
-            (r"email", "Email address"),
-            (r"phone|mobile|fax|tel", "Phone"),
-            (r"ssn|pssn|sssn|social", "National Identifier"),
-            (r"dob|birth|bdate", "Date of Birth"),
-            (r"zip|postal", "Zip code"),
-            (r"city", "City"),
-            (r"state", "State"),
-        ]
-
-        # Non-PII keywords if "NOT_PII" exists in label space
-        self.notpii_terms = {"flag", "status", "code", "type", "amount", "value", "id"}
-
-    def guess(self, column_name: str) -> Optional[str]:
-        norm = column_name.strip().lower()
-
-        # Non-PII
-        if "not_pii" in [l.lower() for l in self.label_space]:
-            for t in self.notpii_terms:
-                if t in norm:
-                    return _canonicalize("NOT_PII", self.label_space)
-
-        # High-precision regex rules
-        for pattern, label in self.rules:
-            if re.search(pattern, norm):
-                return _canonicalize(label, self.label_space)
-
-        # Substring fallbacks for dataset abbreviations
-        if "dob" in norm:
-            return _canonicalize("Date of Birth", self.label_space)
-        if "fname" in norm or "f name" in norm or "sfn" in norm:
-            return _canonicalize("First name", self.label_space)
-        if "lname" in norm or "l name" in norm or "sln" in norm:
-            return _canonicalize("Last name", self.label_space)
-        if "address" in norm or "addr" in norm:
-            return _canonicalize("Address", self.label_space)
-
-        # Vague "name" → unsure
-        if re.search(r"\bname\b", norm):
+def _analyze_all_words(column_name: str, label_space: List[str]) -> Optional[str]:
+    """
+    Analyze ALL identifiable words in column name and return PII type only if there's consensus.
+    Returns None if multiple conflicting PII types are detected.
+    """
+    if not column_name:
+        return None
+        
+    # Normalize and extract all words
+    normalized = _normalize_colname(column_name)
+    words = normalized.split()
+    
+    # Word-to-PII-type mapping
+    word_mappings = {
+        # Medicare/Insurance (HIGH PRIORITY - check context)
+        "medicare": ["Medicare ID"],
+        "hic": ["Medicare ID"], 
+        "mco": ["Medicare ID"],  # MCO = Managed Care Organization (Medicare context)
+        "insurance": ["Insurance number"],
+        "policy": ["Insurance number"],
+        
+        # National IDs
+        "ssn": ["National Identifier"],
+        "pssn": ["National Identifier"], 
+        "sssn": ["National Identifier"],
+        "dssn": ["National Identifier"],
+        "social": ["National Identifier"],
+        "security": ["National Identifier"],
+        "national": ["National Identifier"],
+        "aadhaar": ["National Identifier"],
+        "aadhar": ["National Identifier"],
+        "pan": ["National Identifier"],
+        
+        # Names (can be ambiguous)
+        "fname": ["First name"],
+        "sfname": ["First name"],
+        "dfname": ["First name"], 
+        "first": ["First name"],
+        "given": ["First name"],
+        "firstname": ["First name"],
+        
+        "lname": ["Last name"],
+        "slname": ["Last name"],
+        "dlname": ["Last name"],
+        "dmname": ["Last name"],
+        "last": ["Last name"],
+        "surname": ["Last name"],
+        "family": ["Last name"],
+        "lastname": ["Last name"],
+        
+        "full": ["Full name"],
+        "complete": ["Full name"],
+        "employee": ["Full name"],  # employee_name -> Full name
+        
+        # Contact Info (context-dependent)
+        "email": ["Email addresses"],
+        "mail": ["Email addresses"],
+        
+        "phone": ["Phone"],
+        "mobile": ["Phone"],
+        "cell": ["Phone"],
+        "telephone": ["Phone"],
+        "tel": ["Phone"],
+        
+        # Address
+        "address": ["Address"],
+        "addr": ["Address"],
+        "street": ["Address"], 
+        "home": ["Address"],
+        "saddress": ["Address"],
+        "daddress": ["Address"],
+        
+        # Location
+        "city": ["City"],
+        "town": ["City"],
+        "country": ["Country"],
+        
+        # Postal
+        "zip": ["Postal Code"],
+        "postal": ["Postal Code"],
+        "pin": ["Postal Code"],
+        
+        # Date/Age
+        "dob": ["Date of birth"],
+        "birth": ["Date of birth"],
+        "ddob": ["Date of birth"],
+        "age": ["Age"],
+        
+        # Other
+        "bank": ["Bank account"],
+        "account": ["Bank account"],
+        "medical": ["Medical records"],
+        "license": ["Drivers license number"],
+        "licence": ["Drivers license number"],
+        "driving": ["Drivers license number"],
+        
+        # Context words (help disambiguation but don't vote alone)
+        "user": [],     # user_email -> email gets the vote
+        "customer": [], # customer_phone -> phone gets the vote  
+        "number": [],   # mobile_number -> mobile gets the vote
+        "code": [],     # zip_code -> zip gets the vote (unless postal context)
+        "date": [],     # birth_date -> birth gets the vote
+        "name": [],     # too ambiguous alone, needs qualifier
+        "id": [],       # too generic alone
+        "num": [],      # too generic alone
+        "no": [],       # too generic alone
+        "plan": [],     # could be many things alone
+    }
+    
+    # SPECIAL CASE: Handle compound patterns that should always win
+    compound_patterns = {
+        # Medicare compound patterns (highest priority)
+        ("hic", "medicare"): "Medicare ID",
+        ("mco", "medicare"): "Medicare ID", 
+        ("hic", "id", "medicare"): "Medicare ID",
+        ("mco", "name", "medicare"): "Medicare ID",
+        ("mco", "plan", "medicare"): "Medicare ID",
+        
+        # Contact compound patterns
+        ("user", "email"): "Email addresses",
+        ("customer", "phone"): "Phone",
+        ("mobile", "number"): "Phone",
+        
+        # Other compound patterns
+        ("zip", "code"): "Postal Code",
+        ("birth", "date"): "Date of birth",
+        ("employee", "name"): "Full name",
+        ("home", "address"): "Address",
+    }
+    
+    # Check for compound patterns first (highest priority)
+    words_set = set(words)
+    for pattern_words, pii_type in compound_patterns.items():
+        if all(word in words_set for word in pattern_words) and pii_type in label_space:
+            logger.debug(f"[MULTI_WORD] Compound pattern match: {pattern_words} -> {pii_type}")
+            return pii_type
+    
+    # Collect all potential PII types for each meaningful word
+    detected_types = []
+    word_contributions = {}
+    
+    for word in words:
+        if word in word_mappings and word_mappings[word]:  # Only count words that vote
+            potential_types = word_mappings[word]
+            detected_types.extend(potential_types)
+            word_contributions[word] = potential_types
+    
+    logger.debug(f"[MULTI_WORD] '{column_name}' -> normalized: '{normalized}' -> words: {words}")
+    logger.debug(f"[MULTI_WORD] word_contributions: {word_contributions}")
+    
+    if not detected_types:
+        logger.debug(f"[MULTI_WORD] No PII patterns detected")
+        return None
+        
+    # Count occurrences of each PII type
+    type_counts = Counter(detected_types)
+    logger.debug(f"[MULTI_WORD] type_counts: {dict(type_counts)}")
+    
+    # Get unique PII types that were detected
+    unique_types = list(type_counts.keys())
+    
+    # Filter to only types that are in our label space
+    valid_types = [t for t in unique_types if t in label_space]
+    
+    # Decision logic:
+    if len(valid_types) == 0:
+        logger.debug(f"[MULTI_WORD] No valid types in label space")
+        return None
+    elif len(valid_types) == 1:
+        # Clear consensus
+        result = valid_types[0]
+        logger.debug(f"[MULTI_WORD] Clear consensus: {result}")
+        return result
+    else:
+        # Multiple different PII types detected - check for clear winner
+        most_common_type, most_common_count = type_counts.most_common(1)[0]
+        
+        # If one type appears significantly more than others, use it
+        if most_common_count > 1 and most_common_type in label_space:
+            logger.debug(f"[MULTI_WORD] Clear winner by frequency: {most_common_type} ({most_common_count} votes)")
+            return most_common_type
+        else:
+            # True conflict - multiple types with equal evidence
+            logger.debug(f"[MULTI_WORD] True conflict detected: {valid_types} -> returning None for Unsure")
             return None
 
-        return None
+# --- PII reference used ONLY in prompt (enhanced patterns) ---
+
+PII_GUIDE = {
+    "Address": {
+        "desc": "Street/mailing address line 1.",
+        "patterns": ["street", "road", "lane", "avenue", "addr", "address", "saddress", "daddress", "home_address"],
+        "types": ["string", "varchar", "text"],
+        "length": "5—200 chars; free text (may include numbers and punctuation)"
+    },
+    "Address 2": {
+        "desc": "Supplemental address line (apartment/suite/flat).",
+        "patterns": ["address 2", "addr2", "line 2", "suite", "apt", "apartment", "flat"],
+        "types": ["string", "varchar", "text"],
+        "length": "1—100 chars"
+    },
+    "Age": {
+        "desc": "Person's age in years.",
+        "patterns": ["age"],
+        "types": ["int", "integer", "smallint", "tinyint", "number"],
+        "length": "1—3 digits (0—120 typical)"
+    },
+    "Bank account": {
+        "desc": "Bank/financial account number (may be digits or alphanumeric; may include spaces).",
+        "patterns": ["account", "acct", "iban", "accno"],
+        "types": ["string", "varchar", "text", "bigint"],
+        "length": "8—34 chars typical (IBAN up to 34)"
+    },
+    "City": {
+        "desc": "City or town name.",
+        "patterns": ["city", "town", "municipality"],
+        "types": ["string", "varchar", "text"],
+        "length": "2—85 chars"
+    },
+    "Country": {
+        "desc": "Country name or ISO code.",
+        "patterns": ["country"],
+        "types": ["string", "varchar", "text", "char"],
+        "length": "2—3 chars for code (e.g., IN/USA) or full country name"
+    },
+    "Date of birth": {
+        "desc": "Birth date.",
+        "patterns": ["dob", "birth", "dateofbirth", "ddob", "birth_date", "birthdate"],
+        "types": ["date", "datetime", "timestamp", "string"],
+        "length": "8—10+ depending on format (e.g., YYYY-MM-DD, DD/MM/YYYY)"
+    },
+    "Drivers license number": {
+        "desc": "Government driver licence/ID number.",
+        "patterns": ["dl", "licence", "license", "driving"],
+        "types": ["string", "varchar", "text"],
+        "length": "6—18 alphanumeric typical"
+    },
+    "Email addresses": {
+        "desc": "Email address.",
+        "patterns": ["email", "e-mail", "mail", "user_email", "customer_email", "email_addr"],
+        "types": ["string", "varchar", "text"],
+        "length": "6—254 chars; contains '@' and domain"
+    },
+    "First name": {
+        "desc": "Given/first name.",
+        "patterns": ["first", "given", "fname", "sfname", "sfn", "firstname", "dfname"],
+        "types": ["string", "varchar", "text"],
+        "length": "1—50 chars"
+    },
+    "Full name": {
+        "desc": "Full personal name (may include spaces).",
+        "patterns": ["name", "full name", "employee_name", "customer_name", "fullname"],
+        "types": ["string", "varchar", "text"],
+        "length": "5—100 chars typical"
+    },
+    "Insurance number": {
+        "desc": "Insurance/policy/member/subscriber ID.",
+        "patterns": ["insurance", "policy", "member", "subscriber"],
+        "types": ["string", "varchar", "text"],
+        "length": "8—20 alphanumeric typical"
+    },
+    "Last name": {
+        "desc": "Family/surname/last name.",
+        "patterns": ["last", "surname", "lname", "family", "slname", "sln", "lastname", "dlname", "dmname"],
+        "types": ["string", "varchar", "text"],
+        "length": "1—50 chars"
+    },
+    "Medical records": {
+        "desc": "Medical record identifiers (e.g., MRN) or fields containing clinical info.",
+        "patterns": ["medical", "mrn", "ehr", "chart", "clinical", "health"],
+        "types": ["string", "varchar", "text"],
+        "length": "varies; MRNs often 6—12"
+    },
+    "Medicare ID": {
+        "desc": "Medicare programme identifier.",
+        "patterns": ["medicare", "hic", "hic_id", "mco_name", "mco_plan", "medicare_id", "medicare_num", "health_insurance_claim"],
+        "types": ["string", "varchar", "text"],
+        "length": "region-specific; often 10—11 alphanumeric, but can vary 8-255 for systems storing extended Medicare data"
+    },
+    "National Identifier": {
+        "desc": "Government-issued citizen ID (e.g., SSN, Aadhaar, PAN, NRIC).",
+        "patterns": ["ssn", "aadhaar", "aadhar", "pan", "nric", "nin", "nid", "national id", "identifier", "pssn", "sssn", "dssn", "social_security"],
+        "types": ["string", "varchar", "text"],
+        "length": "country-specific (e.g., SSN 9 digits; Aadhaar 12 digits; PAN 10 alphanum)"
+    },
+    "Phone": {
+        "desc": "Telephone or mobile number (may include + country code).",
+        "patterns": ["phone", "mobile", "telephone", "tel", "cell", "msisdn", "customer_phone", "mobile_number", "phone_number"],
+        "types": ["string", "varchar", "text", "bigint"],
+        "length": "7—15 digits typical (may include + and separators)"
+    },
+    "Postal Code": {
+        "desc": "Postal/ZIP/PIN code.",
+        "patterns": ["postal", "zip", "postcode", "pincode", "zip_code", "postal_code"],
+        "types": ["string", "varchar", "text", "int"],
+        "length": "4—10 alphanumeric depending on country (IN 6 digits, US 5—10)"
+    },
+}
 
 # --- Model Client --------------------------------------------
 
 class ModelClient:
     def __init__(self, cfg: ModelConfig):
         self.cfg = cfg
+        if getattr(self.cfg, "debug", False):
+            logger.setLevel(logging.DEBUG)
 
-    def query(self, column_name: str, label_space: List[str]) -> Optional[str]:
-        # Heuristic first
-        h = HeuristicPIIGuesser(label_space).guess(column_name)
-        if h:
-            return h
+    def _log(self, msg: str):
+        if self.cfg.debug:
+            logger.debug(msg)
 
+    def query(self, column_name: str, datatype: Optional[str], col_length: Optional[str | int], label_space: List[str]) -> Optional[str]:
         if self.cfg.provider == "none":
+            logger.warning("Model provider is 'none' — set --provider ollama/openai and --model <n> to enable SLM.")
             return None
 
-        if self.cfg.provider == "ollama":
-            prompt = (
-                f"Column name: '{column_name}'.\n"
-                f"Pick one from this list: {', '.join(label_space)}.\n"
-                f"Answer with only one label or 'Unsure'."
-            )
+        # ---- build the prompt ----
+        normalized = _normalize_colname(column_name)
+        labels_csv = ", ".join(label_space)
+
+        guide_lines = []
+        for lbl in label_space:
+            g = PII_GUIDE.get(lbl, {})
+            desc = g.get("desc", "")
+            pats = ", ".join(g.get("patterns", []))
+            typs = ", ".join(g.get("types", []))
+            lhint = g.get("length", "")
+            guide_lines.append(f"- {lbl}: {desc} | Patterns: {pats} | Types: {typs} | Length: {lhint}")
+        guide_text = "\n".join(guide_lines)
+
+        dtype_text = str(datatype) if datatype is not None else "unknown"
+        length_text = str(col_length) if col_length is not None else "unknown"
+
+        prompt = (
+            "You are a PII classification assistant.\n"
+            "Given a database column, pick EXACTLY ONE label from the Allowed labels list. "
+            "If the column appears to be metadata ABOUT PII (e.g., status, date, verification), or does not fit any label, answer exactly 'Unsure'.\n\n"
+            "## Analysis Steps\n"
+            "1) Deep Column Name Analysis:\n"
+            "   - Break into components (prefixes, roots, suffixes)\n"
+            "   - Determine PRIMARY purpose: actual PII vs metadata ABOUT PII\n"
+            "   - Look for qualifiers that change meaning: Date, Time, Status, Flag, Code, Key, Count, Verified, Valid, Updated\n"
+            "   - Examples: 'EmailAddress' (PII) vs 'EmailBouncedDate' (metadata, Unsure) vs 'PhoneVerified' (metadata, Unsure)\n"
+            "2) Data Type: Is the datatype consistent with the candidate PII label?\n"
+            "3) Length Check: Does the length fit expected ranges for that PII?\n"
+            "4) Final Decision: Select the best label, or 'Unsure' if it clearly represents metadata or is not PII.\n\n"
+            "## Key Rules\n"
+            "- Very short lengths (1—5 chars) often indicate codes/flags, not PII.\n"
+            "- Column Name Analysis is primary: if the name implies a metadata field (e.g., '*Date', '*Flag', '*Status', '*Code', '*Key', '*Count', '*Verified', '*Valid', '*Updated'), prefer 'Unsure'.\n"
+            "- If datatype/length strongly contradict a candidate label, prefer 'Unsure'.\n"
+            "- If the name indicates encryption of a PII value (e.g., 'SSNEncrypted'), treat as the underlying PII.\n\n"
+            "## Allowed labels\n"
+            f"{labels_csv}\n\n"
+            "## PII Reference\n"
+            f"{guide_text}\n\n"
+            "## Column Context\n"
+            f"- Column name (raw): {column_name}\n"
+            f"- Column name (normalized): {normalized}\n"
+            f"- Datatype: {dtype_text}\n"
+            f"- Column Length: {length_text}\n\n"
+            "Respond with ONLY the label string exactly as it appears in Allowed labels (no extra text)."
+        )
+
+        # ---- logging inputs / prompt preview ----
+        self._log(f"[REQUEST] provider={self.cfg.provider} model={self.cfg.model} url={self.cfg.base_url}")
+        self._log(f"[CONTEXT] raw='{column_name}' | norm='{normalized}' | dtype='{dtype_text}' | length='{length_text}'")
+        self._log(f"[ALLOWED] {labels_csv}")
+        self._log(f"[PROMPT_PREVIEW]\n{prompt[:1200]}{'...<trimmed>' if len(prompt)>1200 else ''}")
+
+        # ---- call model based on provider ----
+        try:
+            if self.cfg.provider == "ollama":
+                return self._call_ollama(prompt)
+            elif self.cfg.provider == "openai":
+                return self._call_openai(prompt)
+            else:
+                logger.error(f"Unknown provider: {self.cfg.provider}")
+                return None
+        except Exception as e:
+            logger.error(f"[ERROR] model call failed: {e}")
+            return None
+
+    def _call_ollama(self, prompt: str) -> Optional[str]:
+        """Call Ollama API with proper error handling"""
+        # Try /api/generate first (most common)
+        url = f"{self.cfg.base_url.rstrip('/')}/api/generate"
+        self._log(f"[TRY] Ollama generate: {url}")
+        
+        payload = {
+            "model": self.cfg.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "top_p": 1,
+                "num_predict": 64
+            }
+        }
+        
+        try:
             r = requests.post(
-                f"{self.cfg.base_url}/api/generate",
-                json={"model": self.cfg.model, "prompt": prompt, "stream": False},
-                timeout=60,
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", "Connection": "close"},
+                timeout=self.cfg.request_timeout,
             )
-            text = r.json().get("response", "").strip()
-            return _canonicalize(text, label_space)
+            
+            if r.status_code == 404:
+                # Try /api/chat endpoint as fallback
+                self._log("[FALLBACK] /api/generate returned 404, trying /api/chat")
+                return self._call_ollama_chat(prompt)
+            
+            r.raise_for_status()
+            
+            response_data = r.json()
+            text = (response_data.get("response") or "").strip()
+            
+            self._log(f"[RESPONSE] status={r.status_code} len={len(text)}")
+            self._log(f"[RAW_OUTPUT] {text}")
+            
+            return self._canonicalize_response(text)
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[ERROR] Ollama generate call failed: {e}")
+            # Try chat endpoint as fallback
+            return self._call_ollama_chat(prompt)
 
-        if self.cfg.provider == "openai":
-            prompt = (
-                f"Column name: '{column_name}'.\n"
-                f"Pick one from this list: {', '.join(label_space)}.\n"
-                f"Answer with only one label or 'Unsure'."
-            )
+    def _call_ollama_chat(self, prompt: str) -> Optional[str]:
+        """Fallback to Ollama chat endpoint"""
+        url = f"{self.cfg.base_url.rstrip('/')}/api/chat"
+        self._log(f"[TRY] Ollama chat: {url}")
+        
+        payload = {
+            "model": self.cfg.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "top_p": 1,
+                "num_predict": 64
+            }
+        }
+        
+        try:
             r = requests.post(
-                f"{self.cfg.base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer TOKEN"},
-                json={
-                    "model": self.cfg.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                },
-                timeout=60,
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", "Connection": "close"},
+                timeout=self.cfg.request_timeout,
             )
-            text = r.json()["choices"][0]["message"]["content"].strip()
-            return _canonicalize(text, label_space)
+            r.raise_for_status()
+            
+            data = r.json()
+            # Handle different response formats
+            if "message" in data and "content" in data["message"]:
+                text = (data["message"]["content"] or "").strip()
+            else:
+                text = (data.get("response") or "").strip()
+            
+            self._log(f"[RESPONSE] chat status={r.status_code} len={len(text)}")
+            self._log(f"[RAW_OUTPUT] {text}")
+            
+            return self._canonicalize_response(text)
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Ollama chat call failed: {e}")
+            return None
 
-        return None
+    def _call_openai(self, prompt: str) -> Optional[str]:
+        """Call OpenAI-compatible API"""
+        url = f"{self.cfg.base_url.rstrip('/')}/v1/chat/completions"
+        self._log(f"[TRY] OpenAI-compatible chat: {url}")
+        
+        payload = {
+            "model": self.cfg.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 64
+        }
+        
+        try:
+            r = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=self.cfg.request_timeout,
+            )
+            r.raise_for_status()
+            
+            data = r.json()
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            
+            self._log(f"[RESPONSE] openai status={r.status_code} len={len(text)}")
+            self._log(f"[RAW_OUTPUT] {text}")
+            
+            return self._canonicalize_response(text)
+            
+        except Exception as e:
+            logger.error(f"[ERROR] OpenAI call failed: {e}")
+            return None
 
-# --- Validator ------------------------------------------------
+    def _canonicalize_response(self, text: str) -> Optional[str]:
+        """Parse and canonicalize the model response"""
+        if not text:
+            return None
+        
+        # Clean up response - remove quotes, extra whitespace
+        cleaned = text.strip().strip('"').strip("'").strip()
+        
+        mapped = _canonicalize(cleaned, self.cfg.label_space or PII_LABELS)
+        self._log(f"[PARSE] '{text}' -> '{cleaned}' -> mapped={mapped}")
+        
+        return mapped
+
+# --- Validator (unchanged verdict logic; with verdict logs) ---
 
 class TargetedPIIValidator:
     def __init__(self, cfg: ModelConfig):
         self.client = ModelClient(cfg)
-        self.label_space = cfg.label_space or []
+        self.label_space = cfg.label_space or list(PII_LABELS)
 
-    def validate_row(self, column_name: str, guessed: str) -> str:
-        model_guess = self.client.query(column_name, self.label_space)
+    def validate_row(self, column_name: str, guessed: str, datatype: Optional[str] = None, col_length: Optional[str | int] = None) -> str:
+        mapped = self.client.query(column_name, datatype, col_length, self.label_space)
 
-        if not model_guess:
+        if not mapped:
+            logger.info(f"[VERDICT] column='{column_name}' -> Unsure (guessed='{(guessed or '').strip()}')")
             return "Unsure"
 
-        if model_guess.lower() == guessed.strip().lower():
-            return "True positive"
-
-        return f"Negative: {model_guess}"
+        verdict = "True positive" if mapped.strip().lower() == (guessed or "").strip().lower() else f"Negative: {mapped}"
+        logger.info(f"[VERDICT] column='{column_name}' -> {verdict}")
+        return verdict
