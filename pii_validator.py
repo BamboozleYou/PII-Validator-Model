@@ -3,7 +3,7 @@ import json
 import logging
 import requests
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from collections import Counter
 
 # ---------- Logging ----------
@@ -173,9 +173,9 @@ def _analyze_all_words(column_name: str, label_space: List[str]) -> Optional[str
         "user": [],     # user_email -> email gets the vote
         "customer": [], # customer_phone -> phone gets the vote  
         "number": [],   # mobile_number -> mobile gets the vote
-        "code": [],     # zip_code -> zip gets the vote
+        "code": [],     # zip_code -> zip gets the vote (unless postal context)
         "date": [],     # birth_date -> birth gets the vote
-        "name": [],     # too ambiguous alone
+        "name": [],     # too ambiguous alone, needs qualifier
         "id": [],       # too generic alone
         "num": [],      # too generic alone
         "no": [],       # too generic alone
@@ -203,7 +203,7 @@ def _analyze_all_words(column_name: str, label_space: List[str]) -> Optional[str
         ("home", "address"): "Address",
     }
     
-    # Check for compound patterns first
+    # Check for compound patterns first (highest priority)
     words_set = set(words)
     for pattern_words, pii_type in compound_patterns.items():
         if all(word in words_set for word in pattern_words) and pii_type in label_space:
@@ -410,192 +410,6 @@ def _canonicalize(label: str, label_space: list[str]) -> str | None:
     logger.debug(f"[MAP] no mapping for '{txt}' -> None")
     return None
 
-def _analyze_all_words(column_name: str, label_space: List[str]) -> Optional[str]:
-    """
-    Analyze ALL identifiable words in column name and return PII type only if there's consensus.
-    Returns None if multiple conflicting PII types are detected.
-    """
-    if not column_name:
-        return None
-        
-    # Normalize and extract all words
-    normalized = _normalize_colname(column_name)
-    words = normalized.split()
-    
-    # Word-to-PII-type mapping
-    word_mappings = {
-        # Medicare/Insurance (HIGH PRIORITY - check context)
-        "medicare": ["Medicare ID"],
-        "hic": ["Medicare ID"], 
-        "mco": ["Medicare ID"],  # MCO = Managed Care Organization (Medicare context)
-        "insurance": ["Insurance number"],
-        "policy": ["Insurance number"],
-        
-        # National IDs
-        "ssn": ["National Identifier"],
-        "pssn": ["National Identifier"], 
-        "sssn": ["National Identifier"],
-        "dssn": ["National Identifier"],
-        "social": ["National Identifier"],
-        "security": ["National Identifier"],
-        "national": ["National Identifier"],
-        "aadhaar": ["National Identifier"],
-        "aadhar": ["National Identifier"],
-        "pan": ["National Identifier"],
-        
-        # Names (can be ambiguous)
-        "fname": ["First name"],
-        "sfname": ["First name"],
-        "dfname": ["First name"], 
-        "first": ["First name"],
-        "given": ["First name"],
-        "firstname": ["First name"],
-        
-        "lname": ["Last name"],
-        "slname": ["Last name"],
-        "dlname": ["Last name"],
-        "dmname": ["Last name"],
-        "last": ["Last name"],
-        "surname": ["Last name"],
-        "family": ["Last name"],
-        "lastname": ["Last name"],
-        
-        "full": ["Full name"],
-        "complete": ["Full name"],
-        "employee": ["Full name"],  # employee_name -> Full name
-        
-        # Contact Info (context-dependent)
-        "email": ["Email addresses"],
-        "mail": ["Email addresses"],
-        
-        "phone": ["Phone"],
-        "mobile": ["Phone"],
-        "cell": ["Phone"],
-        "telephone": ["Phone"],
-        "tel": ["Phone"],
-        
-        # Address
-        "address": ["Address"],
-        "addr": ["Address"],
-        "street": ["Address"], 
-        "home": ["Address"],
-        "saddress": ["Address"],
-        "daddress": ["Address"],
-        
-        # Location
-        "city": ["City"],
-        "town": ["City"],
-        "country": ["Country"],
-        
-        # Postal
-        "zip": ["Postal Code"],
-        "postal": ["Postal Code"],
-        "pin": ["Postal Code"],
-        
-        # Date/Age
-        "dob": ["Date of birth"],
-        "birth": ["Date of birth"],
-        "ddob": ["Date of birth"],
-        "age": ["Age"],
-        
-        # Other
-        "bank": ["Bank account"],
-        "account": ["Bank account"],
-        "medical": ["Medical records"],
-        "license": ["Drivers license number"],
-        "licence": ["Drivers license number"],
-        "driving": ["Drivers license number"],
-        
-        # Context words (help disambiguation but don't vote alone)
-        "user": [],     # user_email -> email gets the vote
-        "customer": [], # customer_phone -> phone gets the vote  
-        "number": [],   # mobile_number -> mobile gets the vote
-        "code": [],     # zip_code -> zip gets the vote (unless postal context)
-        "date": [],     # birth_date -> birth gets the vote
-        "name": [],     # too ambiguous alone, needs qualifier
-        "id": [],       # too generic alone
-        "num": [],      # too generic alone
-        "no": [],       # too generic alone
-        "plan": [],     # could be many things alone
-    }
-    
-    # SPECIAL CASE: Handle compound patterns that should always win
-    compound_patterns = {
-        # Medicare compound patterns (highest priority)
-        ("hic", "medicare"): "Medicare ID",
-        ("mco", "medicare"): "Medicare ID", 
-        ("hic", "id", "medicare"): "Medicare ID",
-        ("mco", "name", "medicare"): "Medicare ID",
-        ("mco", "plan", "medicare"): "Medicare ID",
-        
-        # Contact compound patterns
-        ("user", "email"): "Email addresses",
-        ("customer", "phone"): "Phone",
-        ("mobile", "number"): "Phone",
-        
-        # Other compound patterns
-        ("zip", "code"): "Postal Code",
-        ("birth", "date"): "Date of birth",
-        ("employee", "name"): "Full name",
-        ("home", "address"): "Address",
-    }
-    
-    # Check for compound patterns first (highest priority)
-    words_set = set(words)
-    for pattern_words, pii_type in compound_patterns.items():
-        if all(word in words_set for word in pattern_words) and pii_type in label_space:
-            logger.debug(f"[MULTI_WORD] Compound pattern match: {pattern_words} -> {pii_type}")
-            return pii_type
-    
-    # Collect all potential PII types for each meaningful word
-    detected_types = []
-    word_contributions = {}
-    
-    for word in words:
-        if word in word_mappings and word_mappings[word]:  # Only count words that vote
-            potential_types = word_mappings[word]
-            detected_types.extend(potential_types)
-            word_contributions[word] = potential_types
-    
-    logger.debug(f"[MULTI_WORD] '{column_name}' -> normalized: '{normalized}' -> words: {words}")
-    logger.debug(f"[MULTI_WORD] word_contributions: {word_contributions}")
-    
-    if not detected_types:
-        logger.debug(f"[MULTI_WORD] No PII patterns detected")
-        return None
-        
-    # Count occurrences of each PII type
-    type_counts = Counter(detected_types)
-    logger.debug(f"[MULTI_WORD] type_counts: {dict(type_counts)}")
-    
-    # Get unique PII types that were detected
-    unique_types = list(type_counts.keys())
-    
-    # Filter to only types that are in our label space
-    valid_types = [t for t in unique_types if t in label_space]
-    
-    # Decision logic:
-    if len(valid_types) == 0:
-        logger.debug(f"[MULTI_WORD] No valid types in label space")
-        return None
-    elif len(valid_types) == 1:
-        # Clear consensus
-        result = valid_types[0]
-        logger.debug(f"[MULTI_WORD] Clear consensus: {result}")
-        return result
-    else:
-        # Multiple different PII types detected - check for clear winner
-        most_common_type, most_common_count = type_counts.most_common(1)[0]
-        
-        # If one type appears significantly more than others, use it
-        if most_common_count > 1 and most_common_type in label_space:
-            logger.debug(f"[MULTI_WORD] Clear winner by frequency: {most_common_type} ({most_common_count} votes)")
-            return most_common_type
-        else:
-            # True conflict - multiple types with equal evidence
-            logger.debug(f"[MULTI_WORD] True conflict detected: {valid_types} -> returning None for Unsure")
-            return None
-
 # --- PII reference used ONLY in prompt (enhanced patterns) ---
 
 PII_GUIDE = {
@@ -721,10 +535,11 @@ class ModelClient:
         if self.cfg.debug:
             logger.debug(msg)
 
-    def query(self, column_name: str, datatype: Optional[str], col_length: Optional[str | int], label_space: List[str]) -> Optional[str]:
+    def query(self, column_name: str, datatype: Optional[str], col_length: Optional[str | int], label_space: List[str]) -> Tuple[Optional[str], str]:
+        """Returns (classification, reasoning)"""
         if self.cfg.provider == "none":
             logger.warning("Model provider is 'none' — set --provider ollama/openai and --model <n> to enable SLM.")
-            return None
+            return None, ""
 
         # ---- build the prompt ----
         normalized = _normalize_colname(column_name)
@@ -770,7 +585,12 @@ class ModelClient:
             f"- Column name (normalized): {normalized}\n"
             f"- Datatype: {dtype_text}\n"
             f"- Column Length: {length_text}\n\n"
-            "Respond with ONLY the label string exactly as it appears in Allowed labels (no extra text)."
+            "## Response Format\n"
+            "Respond with ONLY the classification label exactly as it appears in Allowed labels.\n"
+            "If you want to provide brief reasoning (1 line max), format as:\n"
+            "Classification: [LABEL]\n"
+            "Reasoning: [Brief explanation]\n\n"
+            "Otherwise just respond with the label alone."
         )
 
         # ---- logging inputs / prompt preview ----
@@ -787,12 +607,12 @@ class ModelClient:
                 return self._call_openai(prompt)
             else:
                 logger.error(f"Unknown provider: {self.cfg.provider}")
-                return None
+                return None, ""
         except Exception as e:
             logger.error(f"[ERROR] model call failed: {e}")
-            return None
+            return None, ""
 
-    def _call_ollama(self, prompt: str) -> Optional[str]:
+    def _call_ollama(self, prompt: str) -> Tuple[Optional[str], str]:
         """Call Ollama API with proper error handling"""
         # Try /api/generate first (most common)
         url = f"{self.cfg.base_url.rstrip('/')}/api/generate"
@@ -805,7 +625,7 @@ class ModelClient:
             "options": {
                 "temperature": 0,
                 "top_p": 1,
-                "num_predict": 64
+                "num_predict": 128  # Increased for reasoning
             }
         }
         
@@ -837,7 +657,7 @@ class ModelClient:
             # Try chat endpoint as fallback
             return self._call_ollama_chat(prompt)
 
-    def _call_ollama_chat(self, prompt: str) -> Optional[str]:
+    def _call_ollama_chat(self, prompt: str) -> Tuple[Optional[str], str]:
         """Fallback to Ollama chat endpoint"""
         url = f"{self.cfg.base_url.rstrip('/')}/api/chat"
         self._log(f"[TRY] Ollama chat: {url}")
@@ -849,7 +669,7 @@ class ModelClient:
             "options": {
                 "temperature": 0,
                 "top_p": 1,
-                "num_predict": 64
+                "num_predict": 128  # Increased for reasoning
             }
         }
         
@@ -876,9 +696,9 @@ class ModelClient:
             
         except Exception as e:
             logger.error(f"[ERROR] Ollama chat call failed: {e}")
-            return None
+            return None, ""
 
-    def _call_openai(self, prompt: str) -> Optional[str]:
+    def _call_openai(self, prompt: str) -> Tuple[Optional[str], str]:
         """Call OpenAI-compatible API"""
         url = f"{self.cfg.base_url.rstrip('/')}/v1/chat/completions"
         self._log(f"[TRY] OpenAI-compatible chat: {url}")
@@ -887,7 +707,7 @@ class ModelClient:
             "model": self.cfg.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 64
+            "max_tokens": 128  # Increased for reasoning
         }
         
         try:
@@ -909,35 +729,67 @@ class ModelClient:
             
         except Exception as e:
             logger.error(f"[ERROR] OpenAI call failed: {e}")
-            return None
+            return None, ""
 
-    def _canonicalize_response(self, text: str) -> Optional[str]:
-        """Parse and canonicalize the model response"""
+    def _canonicalize_response(self, text: str) -> Tuple[Optional[str], str]:
+        """Parse and canonicalize the model response, returning (classification, reasoning)"""
         if not text:
-            return None
+            return None, ""
         
-        # Clean up response - remove quotes, extra whitespace
-        cleaned = text.strip().strip('"').strip("'").strip()
+        # Clean up response - remove extra whitespace
+        cleaned = text.strip()
         
-        mapped = _canonicalize(cleaned, self.cfg.label_space or PII_LABELS)
-        self._log(f"[PARSE] '{text}' -> '{cleaned}' -> mapped={mapped}")
-        
-        return mapped
+        # Check if response has structured format with reasoning
+        if "Classification:" in cleaned and "Reasoning:" in cleaned:
+            lines = cleaned.split('\n')
+            classification_line = ""
+            reasoning_line = ""
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith("Classification:"):
+                    classification_line = line.replace("Classification:", "").strip()
+                elif line.startswith("Reasoning:"):
+                    reasoning_line = line.replace("Reasoning:", "").strip()
+            
+            # Clean up classification
+            classification = classification_line.strip().strip('"').strip("'").strip()
+            reasoning = reasoning_line[:200]  # Limit reasoning to 200 chars max
+            
+            mapped = _canonicalize(classification, self.cfg.label_space or PII_LABELS)
+            self._log(f"[PARSE] structured: '{text}' -> classification='{classification}' -> mapped={mapped}, reasoning='{reasoning}'")
+            
+            return mapped, reasoning
+        else:
+            # Simple format - just the classification
+            classification = cleaned.strip().strip('"').strip("'").strip()
+            mapped = _canonicalize(classification, self.cfg.label_space or PII_LABELS)
+            self._log(f"[PARSE] simple: '{text}' -> '{classification}' -> mapped={mapped}")
+            
+            return mapped, ""
 
-# --- Validator (unchanged verdict logic; with verdict logs) ---
+# --- Validator (enhanced with reasoning) --------------------
 
 class TargetedPIIValidator:
     def __init__(self, cfg: ModelConfig):
         self.client = ModelClient(cfg)
         self.label_space = cfg.label_space or list(PII_LABELS)
 
-    def validate_row(self, column_name: str, guessed: str, datatype: Optional[str] = None, col_length: Optional[str | int] = None) -> str:
-        mapped = self.client.query(column_name, datatype, col_length, self.label_space)
+    def validate_row(self, column_name: str, guessed: str, datatype: Optional[str] = None, col_length: Optional[str | int] = None) -> Tuple[str, str, str]:
+        """Returns (confidence_type, slm_guess, reasoning)"""
+        mapped, reasoning = self.client.query(column_name, datatype, col_length, self.label_space)
 
         if not mapped:
             logger.info(f"[VERDICT] column='{column_name}' -> Unsure (guessed='{(guessed or '').strip()}')")
-            return "Unsure"
+            return "Unsure", "", reasoning
 
-        verdict = "True positive" if mapped.strip().lower() == (guessed or "").strip().lower() else f"Negative: {mapped}"
-        logger.info(f"[VERDICT] column='{column_name}' -> {verdict}")
-        return verdict
+        if mapped.strip().lower() == (guessed or "").strip().lower():
+            confidence_type = "True positive"
+            slm_guess = ""
+            logger.info(f"[VERDICT] column='{column_name}' -> {confidence_type}")
+            return confidence_type, slm_guess, ""  # No reasoning stored for true positives
+        else:
+            confidence_type = "Negative" 
+            slm_guess = mapped
+            logger.info(f"[VERDICT] column='{column_name}' -> {confidence_type}: {mapped}")
+            return confidence_type, slm_guess, reasoning  # Store reasoning for negatives
