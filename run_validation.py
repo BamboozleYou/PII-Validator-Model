@@ -63,16 +63,27 @@ def load_table(path: str) -> pd.DataFrame:
     else:
         raise ValueError("Only .csv and .xlsx are supported. Got: " + ext)
 
+def save_table(df: pd.DataFrame, path: str):
+    """Save DataFrame back to CSV or XLSX format based on file extension"""
+    ext = os.path.splitext(path.lower())[1]
+    if ext == ".xlsx":
+        df.to_excel(path, index=False, engine="openpyxl")
+    elif ext == ".csv":
+        df.to_csv(path, index=False)
+    else:
+        raise ValueError("Only .csv and .xlsx are supported for output. Got: " + ext)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", default="none")
     ap.add_argument("--model", default="")
     ap.add_argument("--base_url", default="http://localhost:11434")
     ap.add_argument("--input", required=True)
-    ap.add_argument("--output", default="validation_results.csv")
+    ap.add_argument("--output", default=None, help="Output file path (defaults to modifying input file)")
     ap.add_argument("--debug", action="store_true", help="Enable verbose model I/O logging")
     args = ap.parse_args()
 
+    # Load the input file
     df = load_table(args.input)
     mapping = normalize_columns(df)
 
@@ -82,17 +93,17 @@ def main():
     elif "column_name" in mapping:
         col_col = mapping["column_name"]
     else:
-        raise ValueError("Input must contain a 'Column Name' column")
+        raise ValueError("Input must contain a 'Column Name' or 'column/page' column")
 
     if "classification" in mapping:
         guessed_col = mapping["classification"]
     elif "guessed_pii" in mapping:
         guessed_col = mapping["guessed_pii"]
     else:
-        raise ValueError("Input must contain a 'Guessed Classification' column")
+        raise ValueError("Input must contain a 'classification' or 'Guessed Classification' column")
 
     # Optional columns (exact names requested)
-    dtype_col = mapping.get("datatype")                  # 'Datatype'
+    dtype_col = mapping.get("datatype") or mapping.get("columndatatype")                  # 'Datatype' or 'Column Datatype'
     length_col = mapping.get("columnlength") or mapping.get("column_length")  # 'Column Length'
 
     # Use the fixed, hard-coded PII label set (ignore labels in file)
@@ -105,8 +116,14 @@ def main():
     )
     validator = TargetedPIIValidator(cfg)
 
-    results = []
-    for _, row in df.iterrows():
+    # Initialize the new columns
+    confidence_types = []
+    slm_guesses = []
+    reasonings = []
+
+    print(f"Processing {len(df)} rows...")
+    
+    for idx, row in df.iterrows():
         # Required fields
         col_val = row[col_col]
         guessed_val = row[guessed_col]
@@ -134,33 +151,58 @@ def main():
                     except Exception:
                         length_val = str(v)
 
-        verdict = validator.validate_row(
+        # Get the validation result (now returns tuple: confidence_type, slm_guess, reasoning)
+        confidence_type, slm_guess, reasoning = validator.validate_row(
             column_name=colname,
             guessed=guessed,
             datatype=dtype_val,
             col_length=length_val,
         )
 
-        if verdict.startswith("Negative: "):
-            slm_guess = verdict.replace("Negative: ", "")
-        elif verdict == "True positive":
-            slm_guess = guessed.strip()
-        else:
-            slm_guess = ""
+        confidence_types.append(confidence_type)
+        slm_guesses.append(slm_guess)
+        reasonings.append(reasoning)
+        
+        # Progress indicator
+        if (idx + 1) % 5 == 0 or idx + 1 == len(df):
+            print(f"  Processed {idx + 1}/{len(df)} rows")
 
-        results.append({
-            **row.to_dict(),
-            "SLM_Guess": slm_guess,
-            "Validation_Result": verdict
-        })
+    # Add the new columns to the DataFrame
+    df['confidence type'] = confidence_types
+    df['SLM guess'] = slm_guesses
+    df['reasoning'] = reasonings
 
-    out_df = pd.DataFrame(results)
-    out_df.to_csv(args.output, index=False)
-    print(f"Wrote: {args.output}")
+    # Determine output path
+    output_path = args.output if args.output else args.input
+    
+    # Save the enhanced DataFrame
+    save_table(df, output_path)
+    
+    print(f"\n✅ Enhanced file saved to: {output_path}")
+    print(f"📊 Added columns: 'confidence type', 'SLM guess', 'reasoning'")
+    
+    # Show summary statistics
     try:
-        print(out_df["Validation_Result"].value_counts(dropna=False))
-    except Exception:
-        pass
+        print(f"\n📈 Results Summary:")
+        confidence_counts = pd.Series(confidence_types).value_counts(dropna=False)
+        for conf_type, count in confidence_counts.items():
+            print(f"  {conf_type}: {count}")
+            
+        # Show accuracy if we have True positives
+        if "True positive" in confidence_counts:
+            total_classified = len([c for c in confidence_types if c != "Unsure"])
+            accuracy = confidence_counts.get("True positive", 0) / total_classified * 100 if total_classified > 0 else 0
+            print(f"  Accuracy (excluding Unsure): {accuracy:.1f}%")
+        
+        # Show sample reasoning for negatives
+        reasoning_samples = [r for r in reasonings if r.strip()]
+        if reasoning_samples:
+            print(f"\n🧠 Sample Model Reasoning:")
+            for i, sample in enumerate(reasoning_samples[:3]):  # Show up to 3 examples
+                print(f"  {i+1}. {sample}")
+            
+    except Exception as e:
+        print(f"Error generating summary: {e}")
 
 if __name__ == "__main__":
     main()
