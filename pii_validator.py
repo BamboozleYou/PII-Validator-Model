@@ -279,7 +279,7 @@ def _canonicalize(label: str, label_space: list[str]) -> str | None:
 
     # Expanded synonym mapping for better pattern recognition
     synonyms = {
-        # Medicare variations (high priority)
+        # Medicare variations
         "medicare id": "Medicare ID",
         "medicare": "Medicare ID",
         "hic": "Medicare ID",
@@ -378,11 +378,16 @@ def _canonicalize(label: str, label_space: list[str]) -> str | None:
         "city": "City", 
         "town": "City",
         "country": "Country",
+        "total":"NOT_PII",
+        "amount":"NOT_PII",
+        "client":"NOT_PII",
+        "complaint":"NOT_PII",
         
         # Bank/financial
         "account": "Bank account",
         "bank account": "Bank account",
         "account number": "Bank account",
+        
     }
     
     # Check regular synonyms
@@ -410,119 +415,6 @@ def _canonicalize(label: str, label_space: list[str]) -> str | None:
     logger.debug(f"[MAP] no mapping for '{txt}' -> None")
     return None
 
-# --- PII reference used ONLY in prompt (enhanced patterns) ---
-
-PII_GUIDE = {
-    "Address": {
-        "desc": "Street/mailing address line 1.",
-        "patterns": ["street", "road", "lane", "avenue", "addr", "address", "saddress", "daddress", "home_address"],
-        "types": ["string", "varchar", "text"],
-        "length": "5—200 chars; free text (may include numbers and punctuation)"
-    },
-    "Address 2": {
-        "desc": "Supplemental address line (apartment/suite/flat).",
-        "patterns": ["address 2", "addr2", "line 2", "suite", "apt", "apartment", "flat"],
-        "types": ["string", "varchar", "text"],
-        "length": "1—100 chars"
-    },
-    "Age": {
-        "desc": "Person's age in years.",
-        "patterns": ["age"],
-        "types": ["int", "integer", "smallint", "tinyint", "number"],
-        "length": "1—3 digits (0—120 typical)"
-    },
-    "Bank account": {
-        "desc": "Bank/financial account number (may be digits or alphanumeric; may include spaces).",
-        "patterns": ["account", "acct", "iban", "accno"],
-        "types": ["string", "varchar", "text", "bigint"],
-        "length": "8—34 chars typical (IBAN up to 34)"
-    },
-    "City": {
-        "desc": "City or town name.",
-        "patterns": ["city", "town", "municipality"],
-        "types": ["string", "varchar", "text"],
-        "length": "2—85 chars"
-    },
-    "Country": {
-        "desc": "Country name or ISO code.",
-        "patterns": ["country"],
-        "types": ["string", "varchar", "text", "char"],
-        "length": "2—3 chars for code (e.g., IN/USA) or full country name"
-    },
-    "Date of birth": {
-        "desc": "Birth date.",
-        "patterns": ["dob", "birth", "dateofbirth", "ddob", "birth_date", "birthdate"],
-        "types": ["date", "datetime", "timestamp", "string"],
-        "length": "8—10+ depending on format (e.g., YYYY-MM-DD, DD/MM/YYYY)"
-    },
-    "Drivers license number": {
-        "desc": "Government driver licence/ID number.",
-        "patterns": ["dl", "licence", "license", "driving"],
-        "types": ["string", "varchar", "text"],
-        "length": "6—18 alphanumeric typical"
-    },
-    "Email addresses": {
-        "desc": "Email address.",
-        "patterns": ["email", "e-mail", "mail", "user_email", "customer_email", "email_addr"],
-        "types": ["string", "varchar", "text"],
-        "length": "6—254 chars; contains '@' and domain"
-    },
-    "First name": {
-        "desc": "Given/first name.",
-        "patterns": ["first", "given", "fname", "sfname", "sfn", "firstname", "dfname"],
-        "types": ["string", "varchar", "text"],
-        "length": "1—50 chars"
-    },
-    "Full name": {
-        "desc": "Full personal name (may include spaces).",
-        "patterns": ["name", "full name", "employee_name", "customer_name", "fullname"],
-        "types": ["string", "varchar", "text"],
-        "length": "5—100 chars typical"
-    },
-    "Insurance number": {
-        "desc": "Insurance/policy/member/subscriber ID.",
-        "patterns": ["insurance", "policy", "member", "subscriber"],
-        "types": ["string", "varchar", "text"],
-        "length": "8—20 alphanumeric typical"
-    },
-    "Last name": {
-        "desc": "Family/surname/last name.",
-        "patterns": ["last", "surname", "lname", "family", "slname", "sln", "lastname", "dlname", "dmname"],
-        "types": ["string", "varchar", "text"],
-        "length": "1—50 chars"
-    },
-    "Medical records": {
-        "desc": "Medical record identifiers (e.g., MRN) or fields containing clinical info.",
-        "patterns": ["medical", "mrn", "ehr", "chart", "clinical", "health"],
-        "types": ["string", "varchar", "text"],
-        "length": "varies; MRNs often 6—12"
-    },
-    "Medicare ID": {
-        "desc": "Medicare programme identifier.",
-        "patterns": ["medicare", "hic", "hic_id", "mco_name", "mco_plan", "medicare_id", "medicare_num", "health_insurance_claim"],
-        "types": ["string", "varchar", "text"],
-        "length": "region-specific; often 10—11 alphanumeric, but can vary 8-255 for systems storing extended Medicare data"
-    },
-    "National Identifier": {
-        "desc": "Government-issued citizen ID (e.g., SSN, Aadhaar, PAN, NRIC).",
-        "patterns": ["ssn", "aadhaar", "aadhar", "pan", "nric", "nin", "nid", "national id", "identifier", "pssn", "sssn", "dssn", "social_security"],
-        "types": ["string", "varchar", "text"],
-        "length": "country-specific (e.g., SSN 9 digits; Aadhaar 12 digits; PAN 10 alphanum)"
-    },
-    "Phone": {
-        "desc": "Telephone or mobile number (may include + country code).",
-        "patterns": ["phone", "mobile", "telephone", "tel", "cell", "msisdn", "customer_phone", "mobile_number", "phone_number"],
-        "types": ["string", "varchar", "text", "bigint"],
-        "length": "7—15 digits typical (may include + and separators)"
-    },
-    "Postal Code": {
-        "desc": "Postal/ZIP/PIN code.",
-        "patterns": ["postal", "zip", "postcode", "pincode", "zip_code", "postal_code"],
-        "types": ["string", "varchar", "text", "int"],
-        "length": "4—10 alphanumeric depending on country (IN 6 digits, US 5—10)"
-    },
-}
-
 # --- Model Client --------------------------------------------
 
 class ModelClient:
@@ -541,63 +433,22 @@ class ModelClient:
             logger.warning("Model provider is 'none' — set --provider ollama/openai and --model <n> to enable SLM.")
             return None, ""
 
-        # ---- build the prompt ----
-        normalized = _normalize_colname(column_name)
+        # Enhanced prompt that asks for brief reasoning
         labels_csv = ", ".join(label_space)
-
-        guide_lines = []
-        for lbl in label_space:
-            g = PII_GUIDE.get(lbl, {})
-            desc = g.get("desc", "")
-            pats = ", ".join(g.get("patterns", []))
-            typs = ", ".join(g.get("types", []))
-            lhint = g.get("length", "")
-            guide_lines.append(f"- {lbl}: {desc} | Patterns: {pats} | Types: {typs} | Length: {lhint}")
-        guide_text = "\n".join(guide_lines)
-
-        dtype_text = str(datatype) if datatype is not None else "unknown"
-        length_text = str(col_length) if col_length is not None else "unknown"
-
         prompt = (
-            "You are a PII classification assistant.\n"
-            "Given a database column, pick EXACTLY ONE label from the Allowed labels list. "
-            "If the column appears to be metadata ABOUT PII (e.g., status, date, verification), or does not fit any label, answer exactly 'Unsure'.\n\n"
-            "## Analysis Steps\n"
-            "1) Deep Column Name Analysis:\n"
-            "   - Break into components (prefixes, roots, suffixes)\n"
-            "   - Determine PRIMARY purpose: actual PII vs metadata ABOUT PII\n"
-            "   - Look for qualifiers that change meaning: Date, Time, Status, Flag, Code, Key, Count, Verified, Valid, Updated\n"
-            "   - Examples: 'EmailAddress' (PII) vs 'EmailBouncedDate' (metadata, Unsure) vs 'PhoneVerified' (metadata, Unsure)\n"
-            "2) Data Type: Is the datatype consistent with the candidate PII label?\n"
-            "3) Length Check: Does the length fit expected ranges for that PII?\n"
-            "4) Final Decision: Select the best label, or 'Unsure' if it clearly represents metadata or is not PII.\n\n"
-            "## Key Rules\n"
-            "- Very short lengths (1—5 chars) often indicate codes/flags, not PII.\n"
-            "- Column Name Analysis is primary: if the name implies a metadata field (e.g., '*Date', '*Flag', '*Status', '*Code', '*Key', '*Count', '*Verified', '*Valid', '*Updated'), prefer 'Unsure'.\n"
-            "- If datatype/length strongly contradict a candidate label, prefer 'Unsure'.\n"
-            "- If the name indicates encryption of a PII value (e.g., 'SSNEncrypted'), treat as the underlying PII.\n\n"
-            "## Allowed labels\n"
-            f"{labels_csv}\n\n"
-            "## PII Reference\n"
-            f"{guide_text}\n\n"
-            "## Column Context\n"
-            f"- Column name (raw): {column_name}\n"
-            f"- Column name (normalized): {normalized}\n"
-            f"- Datatype: {dtype_text}\n"
-            f"- Column Length: {length_text}\n\n"
-            "## Response Format\n"
-            "Respond with ONLY the classification label exactly as it appears in Allowed labels.\n"
-            "If you want to provide brief reasoning (1 line max), format as:\n"
-            "Classification: [LABEL]\n"
-            "Reasoning: [Brief explanation]\n\n"
-            "Otherwise just respond with the label alone."
+            f"Column name: '{column_name}'.\n"
+            f"Pick one from this list: {labels_csv}.\n"
+            f"Format your answer as:\n"
+            f"Classification: [LABEL]\n"
+            f"Reasoning: [Brief explanation of what in the column name led to this classification]\n\n"
+            f"If unsure, just answer 'Unsure'."
         )
 
         # ---- logging inputs / prompt preview ----
         self._log(f"[REQUEST] provider={self.cfg.provider} model={self.cfg.model} url={self.cfg.base_url}")
-        self._log(f"[CONTEXT] raw='{column_name}' | norm='{normalized}' | dtype='{dtype_text}' | length='{length_text}'")
+        self._log(f"[CONTEXT] raw='{column_name}'")
         self._log(f"[ALLOWED] {labels_csv}")
-        self._log(f"[PROMPT_PREVIEW]\n{prompt[:1200]}{'...<trimmed>' if len(prompt)>1200 else ''}")
+        self._log(f"[PROMPT_PREVIEW] {prompt}")
 
         # ---- call model based on provider ----
         try:
@@ -761,12 +612,45 @@ class ModelClient:
             
             return mapped, reasoning
         else:
-            # Simple format - just the classification
-            classification = cleaned.strip().strip('"').strip("'").strip()
-            mapped = _canonicalize(classification, self.cfg.label_space or PII_LABELS)
-            self._log(f"[PARSE] simple: '{text}' -> '{classification}' -> mapped={mapped}")
+            # Try to extract reasoning from various formats
+            reasoning = ""
+            classification_text = cleaned
             
-            return mapped, ""
+            # Check for common reasoning patterns
+            reasoning_patterns = [
+                r"(.+?)\s*(?:because|due to|since|as|reason:?)\s*(.+?)(?:\.|$)",
+                r"(.+?)\s*-\s*(.+?)(?:\.|$)",
+                r"(.+?)\s*\(\s*(.+?)\s*\)",
+                r"(.+?)\s*:\s*(.+?)(?:\.|$)",
+            ]
+            
+            for pattern in reasoning_patterns:
+                match = re.search(pattern, cleaned, re.IGNORECASE | re.DOTALL)
+                if match:
+                    potential_classification = match.group(1).strip()
+                    potential_reasoning = match.group(2).strip()
+                    
+                    # Check if first group looks like a valid classification
+                    mapped_check = _canonicalize(potential_classification, self.cfg.label_space or PII_LABELS)
+                    if mapped_check:
+                        classification_text = potential_classification
+                        reasoning = potential_reasoning[:200]
+                        break
+            
+            # If no reasoning pattern found, try to extract it from multi-line responses
+            if not reasoning and '\n' in cleaned:
+                lines = cleaned.split('\n')
+                if len(lines) >= 2:
+                    classification_text = lines[0].strip()
+                    reasoning = ' '.join(lines[1:]).strip()[:200]
+            
+            # Clean up classification
+            classification = classification_text.strip().strip('"').strip("'").strip()
+            mapped = _canonicalize(classification, self.cfg.label_space or PII_LABELS)
+            
+            self._log(f"[PARSE] flexible: '{text}' -> classification='{classification}' -> mapped={mapped}, reasoning='{reasoning}'")
+            
+            return mapped, reasoning
 
 # --- Validator (enhanced with reasoning) --------------------
 
@@ -777,11 +661,11 @@ class TargetedPIIValidator:
 
     def validate_row(self, column_name: str, guessed: str, datatype: Optional[str] = None, col_length: Optional[str | int] = None) -> Tuple[str, str, str]:
         """Returns (confidence_type, slm_guess, reasoning)"""
-        mapped, reasoning = self.client.query(column_name, datatype, col_length, self.label_space)
+        mapped, model_reasoning = self.client.query(column_name, datatype, col_length, self.label_space)
 
         if not mapped:
             logger.info(f"[VERDICT] column='{column_name}' -> Unsure (guessed='{(guessed or '').strip()}')")
-            return "Unsure", "", reasoning
+            return "Unsure", "", model_reasoning if model_reasoning else "Model could not classify column"
 
         if mapped.strip().lower() == (guessed or "").strip().lower():
             confidence_type = "True positive"
@@ -791,5 +675,17 @@ class TargetedPIIValidator:
         else:
             confidence_type = "Negative" 
             slm_guess = mapped
+            
+            # Generate reasoning for negative cases
+            if model_reasoning:
+                reasoning = model_reasoning
+            else:
+                # Generate simple reasoning based on the disagreement
+                guessed_clean = (guessed or "").strip()
+                if guessed_clean:
+                    reasoning = f"Model classified as '{mapped}' but expected '{guessed_clean}'"
+                else:
+                    reasoning = f"Model classified as '{mapped}' but no classification was expected"
+            
             logger.info(f"[VERDICT] column='{column_name}' -> {confidence_type}: {mapped}")
-            return confidence_type, slm_guess, reasoning  # Store reasoning for negatives
+            return confidence_type, slm_guess, reasoning
