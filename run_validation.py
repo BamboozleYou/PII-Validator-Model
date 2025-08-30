@@ -11,7 +11,7 @@ def normalize_columns(df):
         mapping[key] = c
     return mapping
 
-def load_table(path: str) -> pd.DataFrame:
+def load_table(path: str, sheet_name: str = None) -> pd.DataFrame:
     """
     Load only CSV or XLSX, always returning a DataFrame.
     - CSV: try default, then encoding & parser fallbacks (utf-8-sig, latin-1, engine='python', sep=None sniff)
@@ -23,10 +23,10 @@ def load_table(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path.lower())[1]
     if ext == ".xlsx":
         try:
-            return pd.read_excel(path, engine="openpyxl")
+            return pd.read_excel(path, engine="openpyxl", sheet_name=sheet_name)
         except ImportError:
             # Fallback if openpyxl isn't installed; pandas may still read with default
-            return pd.read_excel(path)
+            return pd.read_excel(path, sheet_name=sheet_name)
     elif ext == ".csv":
         # 1) vanilla
         try:
@@ -63,11 +63,21 @@ def load_table(path: str) -> pd.DataFrame:
     else:
         raise ValueError("Only .csv and .xlsx are supported. Got: " + ext)
 
-def save_table(df: pd.DataFrame, path: str):
+def save_table(df: pd.DataFrame, path: str, sheet_name: str = None):
     """Save DataFrame back to CSV or XLSX format based on file extension"""
     ext = os.path.splitext(path.lower())[1]
     if ext == ".xlsx":
-        df.to_excel(path, index=False, engine="openpyxl")
+        # For Excel files, we need to preserve other sheets
+        if sheet_name:
+            # Read existing workbook to preserve other sheets
+            try:
+                with pd.ExcelWriter(path, mode='a', if_sheet_exists='replace', engine='openpyxl') as writer:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            except FileNotFoundError:
+                # File doesn't exist, create new
+                df.to_excel(path, sheet_name=sheet_name, index=False, engine="openpyxl")
+        else:
+            df.to_excel(path, index=False, engine="openpyxl")
     elif ext == ".csv":
         df.to_csv(path, index=False)
     else:
@@ -83,121 +93,118 @@ def main():
     ap.add_argument("--debug", action="store_true", help="Enable verbose model I/O logging")
     args = ap.parse_args()
 
-    # Load the input file
-    df = load_table(args.input)
-    mapping = normalize_columns(df)
+    # Load the input file from 'Sensitive Data Summary' sheet
+    df = load_table(args.input, sheet_name='Sensitive Data Summary')
+    
+    # Find the required columns by looking for exact matches (case sensitive)
+    col_col = None
+    classification_col = None
+    confidence_col = None
+    
+    for col in df.columns:
+        if col == "COLUMN/PAGE":
+            col_col = col
+        elif col == "DATA CLASSIFICATION":
+            classification_col = col
+        elif col == "CONFIDENCE TYPE":
+            confidence_col = col
+    
+    if not col_col:
+        raise ValueError("Input must contain a 'COLUMN/PAGE' column")
+    if not classification_col:
+        raise ValueError("Input must contain a 'DATA CLASSIFICATION' column")
+    if not confidence_col:
+        raise ValueError("Input must contain a 'CONFIDENCE TYPE' column")
 
-    # Required columns (same names as before, case-insensitive)
-    if "column/page" in mapping:
-        col_col = mapping["column/page"]
-    elif "column_name" in mapping:
-        col_col = mapping["column_name"]
-    else:
-        raise ValueError("Input must contain a 'Column Name' or 'column/page' column")
+    # Filter for only 'Investigate' rows
+    investigate_mask = df[confidence_col] == 'Investigate'
+    investigate_rows = df[investigate_mask].copy()
+    
+    print(f"Found {len(investigate_rows)} rows with 'Investigate' confidence type out of {len(df)} total rows")
+    
+    if len(investigate_rows) == 0:
+        print("No rows found with 'Investigate' confidence type. Nothing to process.")
+        return
 
-    if "classification" in mapping:
-        guessed_col = mapping["classification"]
-    elif "guessed_pii" in mapping:
-        guessed_col = mapping["guessed_pii"]
-    else:
-        raise ValueError("Input must contain a 'classification' or 'Guessed Classification' column")
-
-    # Optional columns (exact names requested)
-    dtype_col = mapping.get("datatype") or mapping.get("columndatatype")                  # 'Datatype' or 'Column Datatype'
-    length_col = mapping.get("columnlength") or mapping.get("column_length")  # 'Column Length'
-
-    # Use the fixed, hard-coded PII label set (ignore labels in file)
+    # Use the fixed, hard-coded PII label set
     cfg = ModelConfig(
         provider=args.provider,
         model=args.model,
         base_url=args.base_url,
         label_space=list(PII_LABELS),
-        debug=args.debug,   # pass-through to enable logs
+        debug=args.debug,
     )
     validator = TargetedPIIValidator(cfg)
 
-    # Initialize the new columns
-    confidence_types = []
+    # Initialize the new columns for the investigate rows
     slm_guesses = []
-    reasonings = []
+    slm_confidences = []
+    slm_reasonings = []
 
-    print(f"Processing {len(df)} rows...")
+    print(f"Processing {len(investigate_rows)} 'Investigate' rows...")
     
-    for idx, row in df.iterrows():
+    for idx, (orig_idx, row) in enumerate(investigate_rows.iterrows()):
         # Required fields
         col_val = row[col_col]
-        guessed_val = row[guessed_col]
-        colname = "" if pd.isna(col_val) else str(col_val)
-        guessed = "" if pd.isna(guessed_val) else str(guessed_val)
+        classification_val = row[classification_col]
+        
+        # Clean column name (remove brackets if present)
+        colname = "" if pd.isna(col_val) else str(col_val).strip('[]')
+        guessed = "" if pd.isna(classification_val) else str(classification_val)
 
-        # Optional fields
-        dtype_val = None
-        if dtype_col is not None and dtype_col in row:
-            v = row.get(dtype_col, None)
-            dtype_val = None if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v)
-
-        length_val = None
-        if length_col is not None and length_col in row:
-            v = row.get(length_col, None)
-            if v is None or (isinstance(v, float) and pd.isna(v)):
-                length_val = None
-            else:
-                # keep as int if possible; otherwise keep as string
-                try:
-                    length_val = int(v)
-                except Exception:
-                    try:
-                        length_val = int(str(v).strip())
-                    except Exception:
-                        length_val = str(v)
-
-        # Get the validation result (now returns tuple: confidence_type, slm_guess, reasoning)
-        confidence_type, slm_guess, reasoning = validator.validate_row(
+        # Get the validation result (now returns: slm_guess, slm_confidence, slm_reasoning)
+        slm_guess, slm_confidence, slm_reasoning = validator.validate_row(
             column_name=colname,
             guessed=guessed,
-            datatype=dtype_val,
-            col_length=length_val,
+            datatype=None,  # Not available in this sheet
+            col_length=None,  # Not available in this sheet
         )
 
-        confidence_types.append(confidence_type)
         slm_guesses.append(slm_guess)
-        reasonings.append(reasoning)
+        slm_confidences.append(slm_confidence)
+        slm_reasonings.append(slm_reasoning)
         
         # Progress indicator
-        if (idx + 1) % 5 == 0 or idx + 1 == len(df):
-            print(f"  Processed {idx + 1}/{len(df)} rows")
+        if (idx + 1) % 5 == 0 or idx + 1 == len(investigate_rows):
+            print(f"  Processed {idx + 1}/{len(investigate_rows)} rows")
 
-    # Add the new columns to the DataFrame
-    df['confidence type'] = confidence_types
-    df['SLM guess'] = slm_guesses
-    df['reasoning'] = reasonings
+    # Add the new columns to the original DataFrame for investigate rows only
+    # Initialize all rows with empty values first
+    df['SLM Guess'] = ''
+    df['SLM Confidence'] = ''
+    df['SLM Reasoning'] = ''
+    
+    # Update only the investigate rows
+    df.loc[investigate_mask, 'SLM Guess'] = slm_guesses
+    df.loc[investigate_mask, 'SLM Confidence'] = slm_confidences
+    df.loc[investigate_mask, 'SLM Reasoning'] = slm_reasonings
 
     # Determine output path
     output_path = args.output if args.output else args.input
     
-    # Save the enhanced DataFrame
-    save_table(df, output_path)
+    # Save the enhanced DataFrame back to the same sheet
+    save_table(df, output_path, sheet_name='Sensitive Data Summary')
     
-    print(f"\n✅ Enhanced file saved to: {output_path}")
-    print(f"📊 Added columns: 'confidence type', 'SLM guess', 'reasoning'")
+    print(f"\nEnhanced file saved to: {output_path}")
+    print(f"Added columns: 'SLM Guess', 'SLM Confidence', 'SLM Reasoning'")
     
     # Show summary statistics
     try:
-        print(f"\n📈 Results Summary:")
-        confidence_counts = pd.Series(confidence_types).value_counts(dropna=False)
+        print(f"\nResults Summary for 'Investigate' rows:")
+        confidence_counts = pd.Series(slm_confidences).value_counts(dropna=False)
         for conf_type, count in confidence_counts.items():
             print(f"  {conf_type}: {count}")
             
         # Show accuracy if we have True positives
-        if "True positive" in confidence_counts:
-            total_classified = len([c for c in confidence_types if c != "Unsure"])
-            accuracy = confidence_counts.get("True positive", 0) / total_classified * 100 if total_classified > 0 else 0
+        if "True Positive" in confidence_counts:
+            total_classified = len([c for c in slm_confidences if c != "Unsure"])
+            accuracy = confidence_counts.get("True Positive", 0) / total_classified * 100 if total_classified > 0 else 0
             print(f"  Accuracy (excluding Unsure): {accuracy:.1f}%")
         
-        # Show sample reasoning for negatives
-        reasoning_samples = [r for r in reasonings if r.strip()]
+        # Show sample reasoning for negatives and unsure cases
+        reasoning_samples = [r for r in slm_reasonings if r.strip()]
         if reasoning_samples:
-            print(f"\n🧠 Sample Model Reasoning:")
+            print(f"\nSample Model Reasoning:")
             for i, sample in enumerate(reasoning_samples[:3]):  # Show up to 3 examples
                 print(f"  {i+1}. {sample}")
             
@@ -206,4 +213,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
